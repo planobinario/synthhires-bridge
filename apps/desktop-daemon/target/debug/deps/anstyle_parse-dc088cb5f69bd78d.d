@@ -1,9 +1,0 @@
-C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\anstyle_parse-dc088cb5f69bd78d.d: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\params.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\mod.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\definitions.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\table.rs
-
-C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\libanstyle_parse-dc088cb5f69bd78d.rmeta: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\params.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\mod.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\definitions.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\table.rs
-
-C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\lib.rs:
-C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\params.rs:
-C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\mod.rs:
-C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\definitions.rs:
-C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\anstyle-parse-1.0.0\src\state\table.rs:
