@@ -97,7 +97,7 @@ impl CapabilityGate {
 
 fn strip_trailing_sep(p: &Path) -> PathBuf {
     let mut out = p.to_path_buf();
-    while matches!(out.components().last(), Some(Component::Normal(_)) | None)
+    while matches!(out.components().next_back(), Some(Component::Normal(_)) | None)
         && out.ends_with(std::path::MAIN_SEPARATOR.to_string())
     {
         out.pop();

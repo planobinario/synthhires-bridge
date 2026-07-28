@@ -218,7 +218,7 @@ pub async fn download_and_verify(
         .timeout(DOWNLOAD_TIMEOUT)
         .user_agent(concat!("synthhires-bridge/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
 
     let bytes = client
         .get(&entry.url)
@@ -228,7 +228,7 @@ pub async fn download_and_verify(
         .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
         .bytes()
         .await
-        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
 
     let expected = hex::decode(&entry.sha256)
         .map_err(|e| DaemonError::Protocol(format!("invalid sha256 in manifest: {e}")))?;

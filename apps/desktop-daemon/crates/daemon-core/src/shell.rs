@@ -76,10 +76,10 @@ impl<'a> ShellRunner<'a> {
         let start = std::time::Instant::now();
         let mut child = cmd.spawn().map_err(DaemonError::Io)?;
         let stdout = child.stdout.take().ok_or_else(|| DaemonError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "no stdout"),
+            std::io::Error::other("no stdout"),
         ))?;
         let stderr = child.stderr.take().ok_or_else(|| DaemonError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "no stderr"),
+            std::io::Error::other("no stderr"),
         ))?;
 
         let (tx, rx) = mpsc::channel::<ShellOutputChunk>(64);
