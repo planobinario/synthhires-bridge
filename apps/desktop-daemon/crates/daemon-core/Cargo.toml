@@ -1,0 +1,35 @@
+[package]
+name = "daemon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+daemon-protocol = { path = "../daemon-protocol" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+keyring = { workspace = true }
+tracing = { workspace = true }
+thiserror = "1"
+# Pairing flow's HTTP POST to /api/devices/pair/complete.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Encrypted local audit log (apps/desktop-daemon/crates/daemon-core/src/audit.rs).
+aes-gcm = "0.10"
+rand_core = { version = "0.6", features = ["std"] }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+http = "1"
+
+[lib]
+name = "daemon_core"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]

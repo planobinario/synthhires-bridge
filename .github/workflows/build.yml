@@ -1,0 +1,116 @@
+name: Build Desktop Daemon Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: Cargo check
+        run: cargo check --workspace --all-features
+      - name: Clippy
+        run: cargo clippy --workspace --all-features
+
+  desktop:
+    needs: lint
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            use_cross: true
+            ext: .exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: true
+            ext: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+            ext: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+            ext: ""
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthhires-bridge-${{ matrix.target }}
+          path: apps/desktop-daemon/target/${{ matrix.target }}/release/synthhires-bridge${{ matrix.ext }}
+
+  android:
+    needs: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: Build .so for Android
+        run: |
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+            -o ../android-app/app/src/main/jniLibs \
+            build --release -p daemon-core
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Build APK
+        working-directory: apps/android-app
+        run: gradle assembleRelease
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthhires-bridge-android
+          path: apps/android-app/app/build/outputs/apk/release/*.apk

@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/daemon-protocol",
+    "crates/daemon-core",
+    "crates/daemon-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/synthhires/bridge"
+authors = ["SynthHires <[email protected]>"]
+rust-version = "1.74"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util", "fs", "process"] }
+tokio-tungstenite = { version = "0.21", features = ["connect", "rustls-tls-webpki-roots"], default-features = false }
+tungstenite = "0.21"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+# HTTP server for local UI + status (port 7333 by default)
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time + crypto + IDs
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+rand = "0.8"
+
+# TLS / WebPKI verification
+rustls = "0.22"
+rustls-webpki = "0.101"
+webpki-roots = "0.25"
+
+# OS keyring (per-platform secure storage)
+keyring = { version = "2" }
+
+# System tray + native dialogs
+tray-icon = "0.14"
+
+# Filesystem watching
+notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+config = { version = "0.14", default-features = false, features = ["toml"] }
+directories = "5"
+
+# CLI arg parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Ed25519 for signed auto-update manifest verification
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Single-instance lock so two daemons don't fight over the keyring slot
+single-instance = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = 1

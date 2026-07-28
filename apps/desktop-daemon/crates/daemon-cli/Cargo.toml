@@ -1,0 +1,36 @@
+[package]
+name = "synthhires-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SynthHires Desktop Daemon — bridges the agent to your PC's filesystem and terminal."
+
+[[bin]]
+name = "synthhires-bridge"
+path = "src/main.rs"
+
+[dependencies]
+daemon-core = { path = "../daemon-core" }
+daemon-protocol = { path = "../daemon-protocol" }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+keyring = { workspace = true }
+single-instance = { workspace = true }
