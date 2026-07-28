@@ -1,0 +1,11 @@
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\widestring-d85153ab7b288a8d.d: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\mod.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\windows.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstr.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstring.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustr.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustring.rs
+
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\libwidestring-d85153ab7b288a8d.rmeta: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\mod.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\windows.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstr.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstring.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustr.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustring.rs
+
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\lib.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\mod.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\platform\windows.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstr.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ucstring.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustr.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\widestring-0.4.3\src\ustring.rs:

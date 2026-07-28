@@ -1,0 +1,11 @@
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\ctr-ac9b66c01fa51e86.d: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr128.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr32.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr64.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\backend.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\ctr_core.rs
+
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\libctr-ac9b66c01fa51e86.rmeta: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr128.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr32.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr64.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\backend.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\ctr_core.rs
+
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\lib.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr128.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr32.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\flavors\ctr64.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\backend.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\ctr-0.9.2\src\ctr_core.rs:

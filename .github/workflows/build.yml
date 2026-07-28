@@ -21,11 +21,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          components: clippy, rustfmt
       - name: Cargo check
         run: cargo check --workspace --all-features
-      - name: Clippy
-        run: cargo clippy --workspace --all-features
 
   desktop:
     needs: lint

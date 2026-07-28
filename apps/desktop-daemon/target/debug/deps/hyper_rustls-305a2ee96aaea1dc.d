@@ -1,0 +1,9 @@
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\hyper_rustls-305a2ee96aaea1dc.d: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\config.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector\builder.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\stream.rs
+
+C:\Users\emili\Documents\synthhires-bridge\apps\desktop-daemon\target\debug\deps\libhyper_rustls-305a2ee96aaea1dc.rmeta: C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\lib.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\config.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector\builder.rs C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\stream.rs
+
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\lib.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\config.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\connector\builder.rs:
+C:\Users\emili\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\hyper-rustls-0.27.9\src\stream.rs:
