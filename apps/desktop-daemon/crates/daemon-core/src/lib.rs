@@ -26,7 +26,6 @@ pub mod audit;
 pub mod autoupdate;
 pub mod pairing;
 pub mod ws_client;
-pub mod jni_android;
 
 pub use capability::{CapabilityGate, GateDecision};
 pub use shell::ShellRunner;
