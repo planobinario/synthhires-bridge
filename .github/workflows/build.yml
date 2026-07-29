@@ -1,32 +1,73 @@
-name: Build Desktop Daemon Binaries
+name: Build All Platform Binaries
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-native:
-    runs-on: ubuntu-latest
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            use_cross: true
+            artifact: synthhires-bridge-windows.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: false
+            artifact: synthhires-bridge-linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+            artifact: synthhires-bridge-linux-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+            artifact: synthhires-bridge-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+            artifact: synthhires-bridge-macos-arm64
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: apps/desktop-daemon
     steps:
       - uses: actions/checkout@v4
-      - name: Install system deps
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential pkg-config libssl-dev libdbus-1-dev libsecret-1-dev
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          target: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
       - name: Cargo check
         run: cargo check --workspace --all-features
-      - name: Build release
-        run: cargo build --release
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+            BIN="target/${{ matrix.target }}/release/synthhires-bridge"
+            if [[ "${{ matrix.target }}" == *"windows"* ]]; then BIN="$BIN.exe"; fi
+            cp "$BIN" "${{ matrix.artifact }}"
+          else
+            cargo build --release
+            cp target/release/synthhires-bridge "${{ matrix.artifact }}"
+          fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: synthhires-bridge-linux-x64
-          path: apps/desktop-daemon/target/release/synthhires-bridge
+          name: ${{ matrix.artifact }}
+          path: apps/desktop-daemon/${{ matrix.artifact }}
