@@ -60,3 +60,27 @@ jobs:
         with:
           name: synthhires-bridge-${{ matrix.os }}
           path: apps/desktop-daemon/target/release/${{ matrix.artifact }}
+
+  publish-release:
+    needs: build-release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare binaries
+        run: |
+          mkdir release_assets
+          cp artifacts/synthhires-bridge-windows-latest/synthhires-bridge.exe release_assets/synthhires-bridge-windows.exe
+          cp artifacts/synthhires-bridge-macos-latest/synthhires-bridge release_assets/synthhires-bridge-macos
+          cp artifacts/synthhires-bridge-ubuntu-latest/synthhires-bridge release_assets/synthhires-bridge-linux
+      - name: Publish Edge Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: edge
+          name: Edge Build
+          prerelease: true
+          files: release_assets/*
