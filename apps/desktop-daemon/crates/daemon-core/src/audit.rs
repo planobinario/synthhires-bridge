@@ -50,7 +50,7 @@ impl AuditLog {
         } else {
             let mut s = [0u8; 16];
             rand::rngs::OsRng.fill_bytes(&mut s);
-            std::fs::write(&salt_path, s).map_err(DaemonError::Io)?;
+            std::fs::write(&salt_path, &s).map_err(DaemonError::Io)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -124,7 +124,7 @@ fn derive_key(device_id: &str, salt: &[u8]) -> [u8; 32] {
     let mut buf = hasher.finalize();
     for _ in 0..PBKDF2_ITERATIONS {
         let mut h = Sha256::new();
-        h.update(buf);
+        h.update(&buf);
         buf = h.finalize();
     }
     buf.into()

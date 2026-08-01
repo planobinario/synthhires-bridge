@@ -21,10 +21,11 @@ tokio-tungstenite = { version = "0.21", features = ["connect", "rustls-tls-webpk
 tungstenite = "0.21"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
-# HTTP server for local UI + status (port 7333 by default)
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+# UI and Desktop Integration
+eframe = "0.29"
+egui = "0.29"
+notify-rust = "4.11"
+interprocess = { version = "2.2", features = ["tokio"] }
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }

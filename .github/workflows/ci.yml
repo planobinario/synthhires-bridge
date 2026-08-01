@@ -1,0 +1,54 @@
+name: Build & Check Bridge
+
+on:
+  push:
+    paths:
+      - 'apps/desktop-daemon/**'
+  pull_request:
+    paths:
+      - 'apps/desktop-daemon/**'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --bin synthhires-bridge
+      - name: cargo build (release)
+        run: cargo build --release --bin synthhires-bridge
+      - name: cargo test
+        run: cargo test
+
+  build-release:
+    needs: build
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: synthhires-bridge.exe
+          - os: macos-latest
+            artifact: synthhires-bridge
+          - os: ubuntu-latest
+            artifact: synthhires-bridge
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop-daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin synthhires-bridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthhires-bridge-${{ matrix.os }}
+          path: apps/desktop-daemon/target/release/${{ matrix.artifact }}

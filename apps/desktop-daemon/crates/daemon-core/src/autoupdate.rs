@@ -218,7 +218,7 @@ pub async fn download_and_verify(
         .timeout(DOWNLOAD_TIMEOUT)
         .user_agent(concat!("synthhires-bridge/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     let bytes = client
         .get(&entry.url)
@@ -228,7 +228,7 @@ pub async fn download_and_verify(
         .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
         .bytes()
         .await
-        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     let expected = hex::decode(&entry.sha256)
         .map_err(|e| DaemonError::Protocol(format!("invalid sha256 in manifest: {e}")))?;
@@ -251,7 +251,7 @@ pub async fn download_and_verify(
 
 fn current_target() -> &'static str {
     if cfg!(target_os = "windows") {
-        "x86_64-pc-windows-gnu"
+        "x86_64-pc-windows-msvc"
     } else if cfg!(target_os = "macos") {
         if cfg!(target_arch = "aarch64") {
             "aarch64-apple-darwin"
@@ -274,7 +274,7 @@ mod tests {
     fn test_current_target_known() {
         let t = current_target();
         assert!(
-            t == "x86_64-pc-windows-gnu"
+            t == "x86_64-pc-windows-msvc"
                 || t == "x86_64-unknown-linux-gnu"
                 || t == "aarch64-unknown-linux-gnu"
                 || t == "x86_64-apple-darwin"

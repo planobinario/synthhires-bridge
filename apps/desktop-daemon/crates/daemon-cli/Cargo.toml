@@ -11,6 +11,9 @@ description = "SynthHires Desktop Daemon — bridges the agent to your PC's file
 name = "synthhires-bridge"
 path = "src/main.rs"
 
+[build-dependencies]
+winres = "0.1"
+
 [dependencies]
 daemon-core = { path = "../daemon-core" }
 daemon-protocol = { path = "../daemon-protocol" }
@@ -20,9 +23,10 @@ tungstenite = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+notify-rust = { workspace = true }
+interprocess = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -34,3 +38,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 keyring = { workspace = true }
 single-instance = { workspace = true }
+tray-icon = { workspace = true }
+dirs-next = "2"
+open = "5"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security"] }
