@@ -331,6 +331,72 @@ async fn background_daemon_task(
     // We no longer auto-open the web app on launch,
     // we rely on the native egui window to show status.
 
+    // Local HTTP Server for auto-pairing
+    tokio::spawn({
+        let state_http = state.clone();
+        let config_dir_http = config_dir.clone();
+        let backend_url_http = backend_url.clone();
+        async move {
+            use axum::{routing::{get, post}, Router, Json, http::Method};
+            use tower_http::cors::{CorsLayer, Any};
+            use serde::{Deserialize, Serialize};
+
+            #[derive(Serialize)]
+            struct StatusRes { paired: bool }
+            
+            #[derive(Deserialize)]
+            struct PairReq { token: String }
+            
+            #[derive(Serialize)]
+            struct PairRes { success: bool }
+
+            let cors = CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers(Any);
+
+            let app = Router::new()
+                .route("/status", get({
+                    let s = state_http.clone();
+                    move || async move {
+                        let is_paired = s.read().await.device_id.is_some();
+                        Json(StatusRes { paired: is_paired })
+                    }
+                }))
+                .route("/pair", post({
+                    let s = state_http.clone();
+                    let c = config_dir_http.clone();
+                    let b = backend_url_http.clone();
+                    move |Json(payload): Json<PairReq>| async move {
+                        let token = payload.token;
+                        if let Ok(_) = daemon_core::keyring::TokenStore::save(&token, &token) {
+                            let mut st = s.write().await;
+                            st.device_id = Some(token.clone());
+                            let _ = st.save(&c).await;
+                            
+                            // Start WS client
+                            let ws_state = s.clone();
+                            let ws_backend = b.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = run_ws_client(ws_state, ws_backend).await {
+                                    tracing::error!("WS client died: {e}");
+                                }
+                            });
+                            Json(PairRes { success: true })
+                        } else {
+                            Json(PairRes { success: false })
+                        }
+                    }
+                }))
+                .layer(cors);
+
+            if let Ok(listener) = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await {
+                tracing::info!("Local HTTP server running on port {}", local_port);
+                let _ = axum::serve(listener, app).await;
+            }
+        }
+    });
+
     // Spawn WS client if already paired
     if is_paired {
         let ws_state = state.clone();
