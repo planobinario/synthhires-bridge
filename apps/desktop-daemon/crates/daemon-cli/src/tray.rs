@@ -4,7 +4,7 @@ use tokio::sync::{oneshot, RwLock};
 use daemon_core::Result;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    Icon, TrayIconBuilder,
+    Icon, TrayIconBuilder, TrayIconEvent
 };
 
 use super::DaemonState;
@@ -17,6 +17,7 @@ pub fn build_tray(
     _state: Arc<RwLock<DaemonState>>,
     _config_dir: std::path::PathBuf,
     _port: u16,
+    ui_ctx: Arc<RwLock<Option<eframe::egui::Context>>>,
 ) -> Result<(TrayHandle, tokio::sync::oneshot::Receiver<()>)> {
     let (quit_tx, quit_rx) = oneshot::channel();
     let icon = load_icon();
@@ -56,24 +57,40 @@ pub fn build_tray(
         })?;
 
     std::thread::spawn(move || {
+        let tray_channel = TrayIconEvent::receiver();
+        let menu_channel = MenuEvent::receiver();
         loop {
-            let Ok(event) = MenuEvent::receiver().recv() else {
-                break;
-            };
-
-            if event.id == quit_id {
-                let _ = quit_tx.send(());
-                std::process::exit(0);
+            if let Ok(event) = menu_channel.try_recv() {
+                if event.id == quit_id {
+                    let _ = quit_tx.send(());
+                    std::process::exit(0);
+                }
+                if event.id == disconnect_id {
+                    tracing::info!("Disconnect requested from tray.");
+                }
             }
-
-            if event.id == disconnect_id {
-                tracing::info!("Disconnect requested from tray.");
+            if let Ok(event) = tray_channel.try_recv() {
+                if let tray_icon::TrayIconEvent::Click { .. } = event {
+                    if let Some(ctx) = ui_ctx.blocking_read().as_ref() {
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                    }
+                }
             }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     });
 
     let handle = TrayHandle { _tray: tray };
     Ok((handle, quit_rx))
+}
+pub fn show_background_notice() {
+    use notify_rust::Notification;
+    let _ = Notification::new()
+        .summary("SynthHires Bridge")
+        .body("Sigue activo en segundo plano. Haz clic en el icono de la bandeja para verlo o cerrarlo.")
+        .icon("dialog-information")
+        .show();
 }
 
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
