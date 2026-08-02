@@ -270,6 +270,7 @@ async fn background_daemon_task(
         let config_dir_ipc = config_dir.clone();
         let backend_url_ipc = backend_url.clone();
         let state_ipc = state.clone();
+        let status_tx_ipc = status_tx.clone();
         
         async move {
             use interprocess::local_socket::prelude::*;
@@ -327,33 +328,38 @@ async fn background_daemon_task(
                 loop {
                     if let Ok(mut stream) = listener.accept().await {
                         let state_clone = state_ipc.clone();
-                        let backend_url_clone = backend_url_ipc.clone();
                         let config_dir_clone = config_dir_ipc.clone();
-                        
+                        let backend_url_clone = backend_url_ipc.clone();
+                        let status_tx_ipc_clone = status_tx_ipc.clone();
                         tokio::spawn(async move {
-                            let mut buf = [0u8; 1024];
-                            if let Ok(len) = stream.read(&mut buf).await {
-                                let msg = String::from_utf8_lossy(&buf[..len]).to_string();
-                                if let Some(uri) = msg.strip_prefix("synthhires://") {
-                                    let clean_uri = uri.trim_end_matches('/').trim();
-                                    let clean_token = if let Some(t) = clean_uri.strip_prefix("pair?token=") {
-                                        t
-                                    } else {
-                                        clean_uri
-                                    };
-                                    
-                                    if let Ok(_) = daemon_core::keyring::TokenStore::save(clean_token, clean_token) {
-                                        let mut s = state_clone.write().await;
-                                        s.device_id = Some(clean_token.to_string());
-                                        let _ = s.save(&config_dir_clone).await;
-                                        
-                                        let ws_state = state_clone.clone();
-                                        let ws_backend = backend_url_clone;
-                                        let ws_status = status_tx.clone();
-                                        tokio::spawn(async move {
-                                            let _ = run_ws_client(ws_state, ws_backend, ws_status).await;
-                                        });
-                                        let _ = stream.write_all(b"ACK").await;
+                            let mut buf = vec![0; 4096];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                if n > 0 {
+                                    if let Ok(msg) = std::str::from_utf8(&buf[..n]) {
+                                        let msg = msg.trim();
+                                        if msg.starts_with("synthhires://pair?token=") {
+                                            let token = msg.strip_prefix("synthhires://pair?token=").unwrap();
+                                            let clean_token = token.trim_end_matches('/');
+                                            let clean_token = if let Some(idx) = clean_token.find('&') {
+                                                &clean_token[..idx]
+                                            } else {
+                                                clean_token
+                                            };
+                                            
+                                            if let Ok(_) = daemon_core::keyring::TokenStore::save(clean_token, clean_token) {
+                                                let mut s = state_clone.write().await;
+                                                s.device_id = Some(clean_token.to_string());
+                                                let _ = s.save(&config_dir_clone).await;
+                                                
+                                                let ws_state = state_clone.clone();
+                                                let ws_backend = backend_url_clone;
+                                                let ws_status = status_tx_ipc_clone.clone();
+                                                tokio::spawn(async move {
+                                                    let _ = run_ws_client(ws_state, ws_backend, ws_status).await;
+                                                });
+                                                let _ = stream.write_all(b"ACK").await;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -403,6 +409,7 @@ async fn background_daemon_task(
                     let s = state_http.clone();
                     let c = config_dir_http.clone();
                     let b = backend_url_http.clone();
+                    let status_tx_pair = status_tx_http.clone();
                     move |Json(payload): Json<PairReq>| async move {
                         let token = payload.token;
                         if let Ok(_) = daemon_core::keyring::TokenStore::save(&token, &token) {
@@ -415,7 +422,7 @@ async fn background_daemon_task(
                             
                             let ws_state = s.clone();
                             let ws_backend = payload.backend_url.unwrap_or(b.clone());
-                            let ws_status = status_tx_http.clone();
+                            let ws_status = status_tx_pair.clone();
                             tokio::spawn(async move {
                                 let _ = run_ws_client(ws_state, ws_backend, ws_status).await;
                             });
