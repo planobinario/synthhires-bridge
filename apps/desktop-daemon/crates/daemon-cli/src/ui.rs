@@ -120,7 +120,7 @@ impl eframe::App for BridgeApp {
                     } else {
                         egui::Color32::RED
                     };
-                    ui.label(egui::RichText::new(format!("ÔùÅ {}", status)).color(color).strong());
+                    ui.label(egui::RichText::new(status).color(color).strong());
                 });
             });
             

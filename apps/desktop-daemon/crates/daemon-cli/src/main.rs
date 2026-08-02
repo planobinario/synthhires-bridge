@@ -47,6 +47,7 @@ struct Cli {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct DaemonState {
     device_id: Option<String>,
+    backend_url: Option<String>,
     scopes: daemon_protocol::Scopes,
 }
 
@@ -56,6 +57,7 @@ impl DaemonState {
         if !path.exists() {
             return Ok(Self {
                 device_id: None,
+                backend_url: None,
                 scopes: daemon_protocol::Scopes::default(),
             });
         }
@@ -373,7 +375,10 @@ async fn background_daemon_task(
             struct StatusRes { paired: bool }
             
             #[derive(Deserialize)]
-            struct PairReq { token: String }
+            struct PairReq { 
+                token: String,
+                backend_url: Option<String>,
+            }
             
             #[derive(Serialize)]
             struct PairRes { success: bool }
@@ -400,10 +405,13 @@ async fn background_daemon_task(
                         if let Ok(_) = daemon_core::keyring::TokenStore::save(&token, &token) {
                             let mut st = s.write().await;
                             st.device_id = Some(token.clone());
+                            if let Some(ref bu) = payload.backend_url {
+                                st.backend_url = Some(bu.clone());
+                            }
                             let _ = st.save(&c).await;
                             
                             let ws_state = s.clone();
-                            let ws_backend = b.clone();
+                            let ws_backend = payload.backend_url.unwrap_or(b.clone());
                             tokio::spawn(async move {
                                 let _ = run_ws_client(ws_state, ws_backend).await;
                             });
@@ -430,11 +438,13 @@ async fn background_daemon_task(
 
     if is_paired {
         let ws_state = state.clone();
-        let ws_backend = backend_url.clone();
+        let ws_backend = {
+            let s = state.read().await;
+            s.backend_url.clone().unwrap_or(backend_url.clone())
+        };
         let status_tx_ws = status_tx.clone();
         tokio::spawn(async move {
-            let _ = status_tx_ws.send("Conectando al servidor web...".into());
-            match run_ws_client(ws_state, ws_backend).await {
+            match run_ws_client(ws_state, ws_backend, status_tx_ws.clone()).await {
                 Ok(_) => {
                     let _ = status_tx_ws.send("Desconectado de la web".into());
                 }
@@ -453,7 +463,11 @@ async fn background_daemon_task(
     tracing::info!("tokio background daemon exiting");
 }
 
-async fn run_ws_client(state: Arc<RwLock<DaemonState>>, backend_url: String) -> Result<()> {
+async fn run_ws_client(
+    state: Arc<RwLock<DaemonState>>, 
+    backend_url: String,
+    status_tx: tokio::sync::watch::Sender<String>
+) -> Result<()> {
     let device_id = {
         let s = state.read().await;
         s.device_id
@@ -476,6 +490,7 @@ async fn run_ws_client(state: Arc<RwLock<DaemonState>>, backend_url: String) -> 
         "desktop",
         hostname(),
         gate,
+        Some(status_tx)
     );
     ws.run().await
 }
