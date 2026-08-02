@@ -9,9 +9,7 @@
 //!   6. Open local dashboard in default browser on launch.
 //!   7. Spawn system tray icon with menu (Status, Open Dashboard, Unpair, Quit).
 //!   8. Block until Quit is selected from the tray menu.
-
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
