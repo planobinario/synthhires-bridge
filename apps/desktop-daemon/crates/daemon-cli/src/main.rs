@@ -212,7 +212,7 @@ fn main() -> Result<()> {
                 }
             };
             
-            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx, is_already_running, has_tray);
+            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx, is_already_running, has_tray, config_dir.clone());
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
             Ok(Box::new(app))

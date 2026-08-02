@@ -11,6 +11,7 @@ pub struct BridgeApp {
     has_seen_bg_notice: bool,
     is_already_running: bool,
     has_tray: bool,
+    config_dir: std::path::PathBuf,
 }
 
 impl BridgeApp {
@@ -21,6 +22,7 @@ impl BridgeApp {
         kill_tx: mpsc::Sender<Uuid>,
         is_already_running: bool,
         has_tray: bool,
+        config_dir: std::path::PathBuf,
     ) -> Self {
         Self {
             status_rx,
@@ -29,6 +31,7 @@ impl BridgeApp {
             has_seen_bg_notice: false,
             is_already_running,
             has_tray,
+            config_dir,
         }
     }
 
@@ -166,7 +169,8 @@ impl eframe::App for BridgeApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     }
                     if ui.button("Desconectar").clicked() {
-                        // TODO: Implement soft disconnect
+                        let _ = std::fs::remove_dir_all(&self.config_dir);
+                        std::process::exit(0);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(egui::RichText::new("Salir del Bridge").color(egui::Color32::RED)).clicked() {
