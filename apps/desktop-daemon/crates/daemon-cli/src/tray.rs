@@ -17,7 +17,6 @@ pub fn build_tray(
     _state: Arc<RwLock<DaemonState>>,
     _config_dir: std::path::PathBuf,
     _port: u16,
-    ui_ctx: Arc<RwLock<Option<eframe::egui::Context>>>,
 ) -> Result<(TrayHandle, tokio::sync::oneshot::Receiver<()>)> {
     let (quit_tx, quit_rx) = oneshot::channel();
     let icon = load_icon();
@@ -30,11 +29,6 @@ pub fn build_tray(
 
     let sep: &'static PredefinedMenuItem = Box::leak(Box::new(PredefinedMenuItem::separator()));
     menu.append(sep).ok();
-
-    let show_window_item: &'static MenuItem =
-        Box::leak(Box::new(MenuItem::new("🖼 Mostrar Ventana", true, None)));
-    let show_window_id = show_window_item.id();
-    menu.append(show_window_item).ok();
 
     let disconnect_item: &'static MenuItem =
         Box::leak(Box::new(MenuItem::new("🔌 Desconectar", true, None)));
@@ -72,21 +66,6 @@ pub fn build_tray(
                 std::process::exit(0);
             }
 
-            if event.id == show_window_id {
-                let rt = tokio::runtime::Handle::try_current();
-                if let Ok(rt) = rt {
-                    rt.block_on(async {
-                        let ctx = ui_ctx.read().await;
-                        if let Some(ctx) = ctx.as_ref() {
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
-                            // Also ensure it's not minimized
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(eframe::egui::vec2(400.0, 500.0)));
-                            tracing::info!("Focus command sent to UI");
-                        }
-                    });
-                }
-            }
-
             if event.id == disconnect_id {
                 tracing::info!("Disconnect requested from tray.");
             }
@@ -95,15 +74,6 @@ pub fn build_tray(
 
     let handle = TrayHandle { _tray: tray };
     Ok((handle, quit_rx))
-}
-
-pub fn show_background_notice() {
-    use notify_rust::Notification;
-    let _ = Notification::new()
-        .summary("SynthHires Bridge")
-        .body("Sigue activo en segundo plano. Haz clic en el icono de la bandeja para verlo o cerrarlo.")
-        .icon("dialog-information")
-        .show();
 }
 
 const TRAY_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");

@@ -22,8 +22,6 @@ tungstenite = "0.21"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # UI and Desktop Integration
-eframe = "0.29"
-egui = "0.29"
 notify-rust = "4.11"
 interprocess = { version = "2.2", features = ["tokio"] }
 

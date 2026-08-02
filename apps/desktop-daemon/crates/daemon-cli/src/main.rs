@@ -24,7 +24,6 @@ use daemon_core::{
 };
 
 mod tray;
-mod ui;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,13 +83,12 @@ fn main() -> Result<()> {
         )
         .init();
 
-    // Spawn Tokio in a separate background thread so it doesn't block the UI
-    let (status_tx, status_rx) = tokio::sync::watch::channel("Iniciando...".to_string());
-    let (tasks_tx, tasks_rx) = tokio::sync::watch::channel(Vec::new());
-    let (kill_tx, kill_rx) = tokio::sync::mpsc::channel(100);
+    let (_kill_tx, kill_rx) = tokio::sync::mpsc::channel(100);
     
-    let ui_ctx = Arc::new(tokio::sync::RwLock::new(None));
-    let ui_ctx_clone = ui_ctx.clone();
+    // Create the event loop required for system tray and other OS events on the main thread
+    let event_loop = winit::event_loop::EventLoop::new().unwrap();
+    // We don't actually need to open any windows, just keep the event loop running
+    // so the tray icon works correctly on Windows/macOS.
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -99,38 +97,25 @@ fn main() -> Result<()> {
             .expect("Failed to build tokio runtime");
             
         rt.block_on(async move {
-            if let Err(e) = background_daemon_task(status_tx, tasks_tx, kill_rx, ui_ctx_clone).await {
+            if let Err(e) = background_daemon_task(kill_rx).await {
                 tracing::error!("Daemon fatal error: {e}");
             }
         });
+        
+        // When background task ends, exit process
+        std::process::exit(0);
     });
 
-    let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 500.0])
-            .with_title("SynthHires Bridge"),
-        ..Default::default()
-    };
-    
-    eframe::run_native(
-        "synthhires-bridge",
-        native_options,
-        Box::new(move |cc| {
-            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx);
-            let mut w_ctx = ui_ctx.blocking_write();
-            *w_ctx = Some(cc.egui_ctx.clone());
-            Ok(Box::new(app))
-        }),
-    ).map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+    #[allow(deprecated)]
+    event_loop.run(move |_event, elwt| {
+        elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+    }).unwrap();
 
     Ok(())
 }
 
 async fn background_daemon_task(
-    status_tx: tokio::sync::watch::Sender<String>,
-    tasks_tx: tokio::sync::watch::Sender<Vec<daemon_core::task_registry::TaskState>>,
     mut kill_rx: tokio::sync::mpsc::Receiver<uuid::Uuid>,
-    ui_ctx: Arc<tokio::sync::RwLock<Option<eframe::egui::Context>>>,
 ) -> Result<()> {
 
     let cli = Cli::parse();
@@ -148,7 +133,7 @@ async fn background_daemon_task(
 
     let local_port = cli.local_port.unwrap_or(7333);
 
-    let web_url = std::env::var("SYNTHHIRES_WEB_URL")
+    let _web_url = std::env::var("SYNTHHIRES_WEB_URL")
         .unwrap_or_else(|_| "http://localhost:4321/space/runtimes".to_string());
 
     let lock = single_instance::SingleInstance::new("synthhires-bridge");
@@ -205,16 +190,12 @@ async fn background_daemon_task(
     // Task Registry loop
     tokio::spawn({
         let tr = task_registry.clone();
-        let t_tx = tasks_tx.clone();
         async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
             loop {
                 interval.tick().await;
                 let mut reg = tr.write().await;
                 reg.cleanup_stale_tasks(std::time::Duration::from_secs(5));
-                // Extract states for UI
-                let states: Vec<_> = reg.states().cloned().collect();
-                let _ = t_tx.send(states);
             }
         }
     });
@@ -361,12 +342,9 @@ async fn background_daemon_task(
         });
     }
 
-    let (_tray_handle, quit_rx) = tray::build_tray(state.clone(), config_dir.clone(), local_port, ui_ctx.clone())?;
+    let (_tray_handle, quit_rx) = tray::build_tray(state.clone(), config_dir.clone(), local_port)?;
     tracing::info!("Daemon background tasks running.");
     
-    // Update status to let UI know
-    let _ = status_tx.send("Conectado (esperando eventos...)".to_string());
-
     // Block the tokio thread until quit signal
     _ = quit_rx.await;
     tracing::info!("tokio background daemon exiting");
