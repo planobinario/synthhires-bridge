@@ -178,12 +178,14 @@ async fn background_daemon_task(
                     let _ = conn.read_exact(&mut buf);
                 }
             } else {
-                let _ = open::that(&web_url);
+                // Just let the existing instance's native UI handle it, 
+                // or we could send a command to focus the window.
+                tracing::info!("No deep link provided. Existing instance is already running.");
             }
             return Ok(());
         }
     } else {
-        let _ = open::that(&web_url);
+        tracing::error!("Could not acquire single instance lock");
         return Ok(());
     }
 
@@ -347,14 +349,8 @@ async fn background_daemon_task(
         }
     });
 
-    // Auto-open web app on launch
-    tokio::spawn({
-        let url = web_url.clone();
-        async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = open::that(&url);
-        }
-    });
+    // We no longer auto-open the web app on launch,
+    // we rely on the native egui window to show status.
 
     // Spawn WS client if already paired
     if is_paired {
