@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! SynthHires Desktop Daemon — binary entry point.
 //!
 //! Lifecycle:
@@ -73,7 +74,6 @@ impl DaemonState {
     }
 }
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
