@@ -164,6 +164,14 @@ async fn background_daemon_task(
                 // Just let the existing instance's native UI handle it, 
                 // or we could send a command to focus the window.
                 tracing::info!("No deep link provided. Existing instance is already running.");
+                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+                {
+                    let _ = notify_rust::Notification::new()
+                        .summary("SynthHires Bridge")
+                        .body("El Daemon ya se está ejecutando en segundo plano.\nBúscalo en la bandeja del sistema (junto al reloj).")
+                        .icon("dialog-information") // o "synthhires" si está registrado
+                        .show();
+                }
             }
             return Ok(());
         }
