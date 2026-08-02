@@ -9,6 +9,7 @@ pub struct BridgeApp {
     tasks_rx: watch::Receiver<Vec<TaskState>>,
     kill_tx: mpsc::Sender<Uuid>,
     has_seen_bg_notice: bool,
+    is_already_running: bool,
 }
 
 impl BridgeApp {
@@ -17,12 +18,14 @@ impl BridgeApp {
         status_rx: watch::Receiver<String>,
         tasks_rx: watch::Receiver<Vec<TaskState>>,
         kill_tx: mpsc::Sender<Uuid>,
+        is_already_running: bool,
     ) -> Self {
         Self {
             status_rx,
             tasks_rx,
             kill_tx,
             has_seen_bg_notice: false,
+            is_already_running,
         }
     }
 
@@ -86,6 +89,22 @@ impl eframe::App for BridgeApp {
         ctx.request_repaint_after(Duration::from_millis(100));
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.is_already_running {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.label(egui::RichText::new("ÔÜá Error").color(egui::Color32::RED).size(32.0).strong());
+                    ui.add_space(20.0);
+                    ui.label(egui::RichText::new("El Daemon ya se est├í ejecutando en segundo plano.").size(16.0));
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Para abrir una nueva instancia, primero debes cerrar la anterior haciendo clic derecho en el icono de SynthHires en la bandeja del sistema (junto al reloj) y seleccionando 'Salir del Bridge'.").color(egui::Color32::DARK_GRAY));
+                    ui.add_space(30.0);
+                    if ui.button(egui::RichText::new("Salir").size(16.0)).clicked() {
+                        std::process::exit(0);
+                    }
+                });
+                return;
+            }
+
             // Header
             ui.horizontal(|ui| {
                 ui.heading("SynthHires Bridge");

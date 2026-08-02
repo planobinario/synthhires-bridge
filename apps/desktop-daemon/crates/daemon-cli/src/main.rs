@@ -73,6 +73,7 @@ impl DaemonState {
     }
 }
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -96,6 +97,7 @@ fn main() -> Result<()> {
     // Check single instance synchronously
     let lock = single_instance::SingleInstance::new("synthhires-bridge");
     let deep_link = std::env::args().find(|a| a.starts_with("synthhires://"));
+    let mut is_already_running = false;
     if let Ok(ref instance) = lock {
         if !instance.is_single() {
             tracing::info!("Bridge is already running.");
@@ -115,16 +117,8 @@ fn main() -> Result<()> {
                 }
             } else {
                 tracing::info!("No deep link provided. Existing instance is already running.");
-                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-                {
-                    let _ = notify_rust::Notification::new()
-                        .summary("SynthHires Bridge")
-                        .body("El Daemon ya se está ejecutando en segundo plano.\nBúscalo en la bandeja del sistema (junto al reloj).")
-                        .icon("dialog-information")
-                        .show();
-                }
             }
-            return Ok(());
+            is_already_running = true;
         }
     }
 
@@ -158,27 +152,29 @@ fn main() -> Result<()> {
     let config_dir_clone = config_dir.clone();
     let (quit_tx, quit_rx) = tokio::sync::oneshot::channel();
     
-    // Spawn background tasks
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to build tokio runtime");
-            
-        rt.block_on(async move {
-            background_daemon_task(
-                state_clone,
-                config_dir_clone,
-                local_port,
-                backend_url,
-                status_tx,
-                tasks_tx,
-                kill_rx,
-                quit_rx
-            ).await;
+    // Spawn background tasks only if we are the primary instance
+    if !is_already_running {
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build tokio runtime");
+                
+            rt.block_on(async move {
+                background_daemon_task(
+                    state_clone,
+                    config_dir_clone,
+                    local_port,
+                    backend_url,
+                    status_tx,
+                    tasks_tx,
+                    kill_rx,
+                    quit_rx
+                ).await;
+            });
+            std::process::exit(0);
         });
-        std::process::exit(0);
-    });
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -212,7 +208,7 @@ fn main() -> Result<()> {
                 }
             };
             
-            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx);
+            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx, is_already_running);
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
             Ok(Box::new(app))
