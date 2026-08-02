@@ -12,7 +12,7 @@
 //! `/home/u/workspace/`.
 
 use daemon_protocol::Scopes;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -64,6 +64,7 @@ impl DaemonState {
         let raw = tokio::fs::read(&path).await.map_err(DaemonError::Io)?;
         Ok(serde_json::from_slice(&raw).unwrap_or(Self {
             device_id: None,
+            backend_url: None,
             scopes: daemon_protocol::Scopes::default(),
         }))
     }
@@ -131,6 +132,7 @@ fn main() -> Result<()> {
     let initial_state = rt_temp.block_on(async {
         DaemonState::load(&config_dir).await.unwrap_or_else(|_| DaemonState {
             device_id: None,
+            backend_url: None,
             scopes: daemon_protocol::Scopes::default(),
         })
     });
@@ -347,8 +349,9 @@ async fn background_daemon_task(
                                         
                                         let ws_state = state_clone.clone();
                                         let ws_backend = backend_url_clone;
+                                        let ws_status = status_tx.clone();
                                         tokio::spawn(async move {
-                                            let _ = run_ws_client(ws_state, ws_backend).await;
+                                            let _ = run_ws_client(ws_state, ws_backend, ws_status).await;
                                         });
                                         let _ = stream.write_all(b"ACK").await;
                                     }
@@ -412,8 +415,9 @@ async fn background_daemon_task(
                             
                             let ws_state = s.clone();
                             let ws_backend = payload.backend_url.unwrap_or(b.clone());
+                            let ws_status = status_tx_http.clone();
                             tokio::spawn(async move {
-                                let _ = run_ws_client(ws_state, ws_backend).await;
+                                let _ = run_ws_client(ws_state, ws_backend, ws_status).await;
                             });
                             Json(PairRes { success: true })
                         } else {
