@@ -78,9 +78,11 @@ jobs:
           cp artifacts/synthhires-bridge-macos-latest/synthhires-bridge release_assets/synthhires-bridge-macos
           cp artifacts/synthhires-bridge-ubuntu-latest/synthhires-bridge release_assets/synthhires-bridge-linux
       - name: Publish Edge Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: edge
-          name: Edge Build
-          prerelease: true
-          files: release_assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create the release if it doesn't exist
+          gh release create edge --title "Edge Build" --prerelease --target main || true
+          
+          # Overwrite the assets with the new ones
+          gh release upload edge release_assets/* --clobber
