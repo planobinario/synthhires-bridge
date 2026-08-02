@@ -188,6 +188,7 @@ fn main() -> Result<()> {
         native_options,
         Box::new(move |cc| {
             // COM is initialized here by winit
+            let mut has_tray = false;
             let _tray_handle = match tray::build_tray(state.clone(), config_dir.clone(), local_port, ui_ctx.clone()) {
                 Ok((handle, internal_quit_rx)) => {
                     // We need to forward internal_quit_rx to quit_tx
@@ -198,6 +199,7 @@ fn main() -> Result<()> {
                             let _ = quit_tx.send(());
                         });
                     });
+                    has_tray = true;
                     Some(handle)
                 }
                 Err(e) => {
@@ -208,7 +210,7 @@ fn main() -> Result<()> {
                 }
             };
             
-            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx, is_already_running);
+            let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx, is_already_running, has_tray);
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
             Ok(Box::new(app))

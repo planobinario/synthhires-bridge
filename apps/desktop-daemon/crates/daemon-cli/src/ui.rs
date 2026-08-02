@@ -10,6 +10,7 @@ pub struct BridgeApp {
     kill_tx: mpsc::Sender<Uuid>,
     has_seen_bg_notice: bool,
     is_already_running: bool,
+    has_tray: bool,
 }
 
 impl BridgeApp {
@@ -19,6 +20,7 @@ impl BridgeApp {
         tasks_rx: watch::Receiver<Vec<TaskState>>,
         kill_tx: mpsc::Sender<Uuid>,
         is_already_running: bool,
+        has_tray: bool,
     ) -> Self {
         Self {
             status_rx,
@@ -26,6 +28,7 @@ impl BridgeApp {
             kill_tx,
             has_seen_bg_notice: false,
             is_already_running,
+            has_tray,
         }
     }
 
@@ -94,7 +97,7 @@ impl eframe::App for BridgeApp {
                     ui.add_space(50.0);
                     ui.label(egui::RichText::new("ÔÜá Error").color(egui::Color32::RED).size(32.0).strong());
                     ui.add_space(20.0);
-                    ui.label(egui::RichText::new("El Daemon ya se est├í ejecutando en segundo plano.").size(16.0));
+                    ui.label(egui::RichText::new("El Daemon ya esta ejecutando en segundo plano.").size(16.0));
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("Para abrir una nueva instancia, primero debes cerrar la anterior haciendo clic derecho en el icono de SynthHires en la bandeja del sistema (junto al reloj) y seleccionando 'Salir del Bridge'.").color(egui::Color32::DARK_GRAY));
                     ui.add_space(30.0);
@@ -138,7 +141,7 @@ impl eframe::App for BridgeApp {
                     if tasks.is_empty() {
                         ui.vertical_centered(|ui| {
                             ui.add_space(20.0);
-                            ui.label(egui::RichText::new("No hay tareas en ejecuci├│n").color(egui::Color32::DARK_GRAY));
+                            ui.label(egui::RichText::new("No hay tareas en ejecucion").color(egui::Color32::DARK_GRAY));
                         });
                     } else {
                         for task in &tasks {
@@ -151,6 +154,11 @@ impl eframe::App for BridgeApp {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cerrar ventana").clicked() {
+                        if !self.has_tray {
+                            // If there is no tray, closing the window MUST exit the app,
+                            // otherwise it becomes an invisible zombie process.
+                            std::process::exit(0);
+                        }
                         if !self.has_seen_bg_notice {
                             crate::tray::show_background_notice();
                             self.has_seen_bg_notice = true;
@@ -167,7 +175,9 @@ impl eframe::App for BridgeApp {
                     });
                 });
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("Cerrar esta ventana no detiene el Bridge. Usa 'Salir del Bridge' para cerrarlo por completo.").small().color(egui::Color32::DARK_GRAY));
+                if self.has_tray {
+                    ui.label(egui::RichText::new("Cerrar esta ventana no detiene el Bridge. Usa 'Salir del Bridge' para cerrarlo por completo.").small().color(egui::Color32::DARK_GRAY));
+                }
                 ui.separator();
             });
         });
