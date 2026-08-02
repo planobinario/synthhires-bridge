@@ -74,23 +74,91 @@ impl DaemonState {
 }
 
 fn main() -> Result<()> {
-    // Start tracing early
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,daemon_core=debug")
-                }),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,daemon_core=debug")),
         )
         .init();
+
+    let cli = Cli::parse();
+    let config_dir = cli.config_dir.clone().unwrap_or_else(|| {
+        directories::ProjectDirs::from("com", "synthhires", "bridge")
+            .map(|d| d.config_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                dirs_next::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("synthhires-bridge")
+            })
+    });
+    std::fs::create_dir_all(&config_dir).ok();
+
+    // Check single instance synchronously
+    let lock = single_instance::SingleInstance::new("synthhires-bridge");
+    let deep_link = std::env::args().find(|a| a.starts_with("synthhires://"));
+    if let Ok(ref instance) = lock {
+        if !instance.is_single() {
+            tracing::info!("Bridge is already running.");
+            if let Some(link) = deep_link {
+                use interprocess::local_socket::prelude::*;
+                use std::io::Write;
+                let name = if cfg!(windows) {
+                    "synthhires-bridge-ipc".to_ns_name::<interprocess::local_socket::GenericNamespaced>().unwrap()
+                } else {
+                    "/tmp/synthhires-bridge-ipc.sock".to_fs_name::<interprocess::local_socket::GenericFilePath>().unwrap()
+                };
+                if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
+                    let _ = conn.write_all(link.as_bytes());
+                    let mut buf = [0u8; 3];
+                    use std::io::Read;
+                    let _ = conn.read_exact(&mut buf);
+                }
+            } else {
+                tracing::info!("No deep link provided. Existing instance is already running.");
+                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+                {
+                    let _ = notify_rust::Notification::new()
+                        .summary("SynthHires Bridge")
+                        .body("El Daemon ya se está ejecutando en segundo plano.\nBúscalo en la bandeja del sistema (junto al reloj).")
+                        .icon("dialog-information")
+                        .show();
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    let local_port = cli.local_port.unwrap_or(7333);
+    
+    // Load state synchronously for main thread
+    let rt_temp = tokio::runtime::Runtime::new().unwrap();
+    let initial_state = rt_temp.block_on(async {
+        DaemonState::load(&config_dir).await.unwrap_or_else(|_| DaemonState {
+            device_id: None,
+            scopes: daemon_protocol::Scopes::default(),
+        })
+    });
+    drop(rt_temp);
+    
+    let state = Arc::new(RwLock::new(initial_state));
+    let ui_ctx = Arc::new(tokio::sync::RwLock::new(None));
 
     let (status_tx, status_rx) = tokio::sync::watch::channel("Iniciando...".to_string());
     let (tasks_tx, tasks_rx) = tokio::sync::watch::channel(Vec::new());
     let (kill_tx, kill_rx) = tokio::sync::mpsc::channel(100);
-    
-    let ui_ctx = Arc::new(tokio::sync::RwLock::new(None));
-    let ui_ctx_clone = ui_ctx.clone();
 
+    // Build tray ON THE MAIN THREAD to avoid COM initialization E_FAIL errors on Windows
+    // We will do it inside the eframe closure where COM is already initialized!
+    
+    let backend_url = cli
+        .backend_url
+        .unwrap_or_else(|| "wss://app.synthhires.com/api/devices/ws".to_string());
+
+    let state_clone = state.clone();
+    let config_dir_clone = config_dir.clone();
+    let (quit_tx, quit_rx) = tokio::sync::oneshot::channel();
+    
+    // Spawn background tasks
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -98,12 +166,17 @@ fn main() -> Result<()> {
             .expect("Failed to build tokio runtime");
             
         rt.block_on(async move {
-            if let Err(e) = background_daemon_task(status_tx, tasks_tx, kill_rx, ui_ctx_clone).await {
-                tracing::error!("Daemon fatal error: {e}");
-            }
+            background_daemon_task(
+                state_clone,
+                config_dir_clone,
+                local_port,
+                backend_url,
+                status_tx,
+                tasks_tx,
+                kill_rx,
+                quit_rx
+            ).await;
         });
-        
-        // When background task ends, exit process
         std::process::exit(0);
     });
 
@@ -118,6 +191,27 @@ fn main() -> Result<()> {
         "synthhires-bridge",
         native_options,
         Box::new(move |cc| {
+            // COM is initialized here by winit
+            let _tray_handle = match tray::build_tray(state.clone(), config_dir.clone(), local_port, ui_ctx.clone()) {
+                Ok((handle, internal_quit_rx)) => {
+                    // We need to forward internal_quit_rx to quit_tx
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        rt.block_on(async move {
+                            let _ = internal_quit_rx.await;
+                            let _ = quit_tx.send(());
+                        });
+                    });
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to build tray: {}", e);
+                    // Prevent quit_tx from dropping so the background daemon doesn't exit!
+                    Box::leak(Box::new(quit_tx));
+                    None
+                }
+            };
+            
             let app = ui::BridgeApp::new(cc, status_rx, tasks_rx, kill_tx);
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
@@ -129,81 +223,15 @@ fn main() -> Result<()> {
 }
 
 async fn background_daemon_task(
+    state: Arc<RwLock<DaemonState>>,
+    config_dir: PathBuf,
+    local_port: u16,
+    backend_url: String,
     status_tx: tokio::sync::watch::Sender<String>,
     tasks_tx: tokio::sync::watch::Sender<Vec<daemon_core::task_registry::TaskState>>,
     mut kill_rx: tokio::sync::mpsc::Receiver<uuid::Uuid>,
-    ui_ctx: Arc<tokio::sync::RwLock<Option<eframe::egui::Context>>>,
-) -> Result<()> {
-
-    let cli = Cli::parse();
-
-    let config_dir = cli.config_dir.clone().unwrap_or_else(|| {
-        directories::ProjectDirs::from("com", "synthhires", "bridge")
-            .map(|d| d.config_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                dirs_next::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("synthhires-bridge")
-            })
-    });
-    std::fs::create_dir_all(&config_dir).ok();
-
-    let local_port = cli.local_port.unwrap_or(7333);
-
-    let _web_url = std::env::var("SYNTHHIRES_WEB_URL")
-        .unwrap_or_else(|_| "http://localhost:4321/space/runtimes".to_string());
-
-    let lock = single_instance::SingleInstance::new("synthhires-bridge");
-    let deep_link = std::env::args().find(|a| a.starts_with("synthhires://"));
-
-    if let Ok(ref instance) = lock {
-        if !instance.is_single() {
-            tracing::info!("Bridge is already running.");
-            // Send deep link via IPC to the running instance
-            if let Some(link) = deep_link {
-                use interprocess::local_socket::prelude::*;
-                use std::io::Write;
-                
-                let name = if cfg!(windows) {
-                    "synthhires-bridge-ipc".to_ns_name::<interprocess::local_socket::GenericNamespaced>().unwrap()
-                } else {
-                    "/tmp/synthhires-bridge-ipc.sock".to_fs_name::<interprocess::local_socket::GenericFilePath>().unwrap()
-                };
-                
-                if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
-                    let _ = conn.write_all(link.as_bytes());
-                    // Wait for ACK
-                    let mut buf = [0u8; 3];
-                    use std::io::Read;
-                    let _ = conn.read_exact(&mut buf);
-                }
-            } else {
-                // Just let the existing instance's native UI handle it, 
-                // or we could send a command to focus the window.
-                tracing::info!("No deep link provided. Existing instance is already running.");
-                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-                {
-                    let _ = notify_rust::Notification::new()
-                        .summary("SynthHires Bridge")
-                        .body("El Daemon ya se está ejecutando en segundo plano.\nBúscalo en la bandeja del sistema (junto al reloj).")
-                        .icon("dialog-information") // o "synthhires" si está registrado
-                        .show();
-                }
-            }
-            return Ok(());
-        }
-    } else {
-        tracing::error!("Could not acquire single instance lock");
-        return Ok(());
-    }
-
-    let state = Arc::new(RwLock::new(DaemonState::load(&config_dir).await?));
-
-    let backend_url = cli
-        .backend_url
-        .unwrap_or_else(|| "wss://app.synthhires.com/api/devices/ws".to_string());
-
-    // Determine pairing status
+    quit_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let is_paired = {
         let s = state.read().await;
         s.device_id.is_some()
@@ -212,7 +240,6 @@ async fn background_daemon_task(
     use daemon_core::task_registry::TaskRegistry;
     let task_registry = Arc::new(tokio::sync::RwLock::new(TaskRegistry::new(200)));
 
-    // Task Registry loop
     tokio::spawn({
         let tr = task_registry.clone();
         async move {
@@ -227,7 +254,6 @@ async fn background_daemon_task(
         }
     });
 
-    // Kill Task loop
     tokio::spawn({
         let tr = task_registry.clone();
         async move {
@@ -238,7 +264,6 @@ async fn background_daemon_task(
         }
     });
 
-    // IPC Listener for deep links
     tokio::spawn({
         let config_dir_ipc = config_dir.clone();
         let backend_url_ipc = backend_url.clone();
@@ -277,7 +302,7 @@ async fn background_daemon_task(
                 unsafe {
                     if ConvertStringSecurityDescriptorToSecurityDescriptorW(
                         sddl.as_ptr(),
-                        1, // SDDL_REVISION_1
+                        1, 
                         &mut sd,
                         ptr::null_mut(),
                     ) != 0 {
@@ -286,8 +311,6 @@ async fn background_daemon_task(
                         if let Ok(owned_sd) = bsd.to_owned_sd() {
                             options = options.security_descriptor(owned_sd);
                         }
-                    } else {
-                        tracing::error!("Failed to set Windows ACL on Named Pipe, error: {}", std::io::Error::last_os_error());
                     }
                 }
             }
@@ -299,7 +322,6 @@ async fn background_daemon_task(
             }
 
             if let Ok(listener) = options.create_tokio() {
-                tracing::info!("IPC Listener bound successfully");
                 loop {
                     if let Ok(mut stream) = listener.accept().await {
                         let state_clone = state_ipc.clone();
@@ -310,59 +332,40 @@ async fn background_daemon_task(
                             let mut buf = [0u8; 1024];
                             if let Ok(len) = stream.read(&mut buf).await {
                                 let msg = String::from_utf8_lossy(&buf[..len]).to_string();
-                                tracing::info!("IPC Received data length: {}", len);
-                                
                                 if let Some(uri) = msg.strip_prefix("synthhires://") {
                                     let clean_uri = uri.trim_end_matches('/').trim();
-                                    
-                                    // Handle `pair?token=...` or `...` directly
                                     let clean_token = if let Some(t) = clean_uri.strip_prefix("pair?token=") {
                                         t
                                     } else {
                                         clean_uri
                                     };
                                     
-                                    tracing::info!("Processing deep link token: {}", clean_token);
                                     if let Ok(_) = daemon_core::keyring::TokenStore::save(clean_token, clean_token) {
                                         let mut s = state_clone.write().await;
                                         s.device_id = Some(clean_token.to_string());
                                         let _ = s.save(&config_dir_clone).await;
                                         
-                                        // Start WS client
                                         let ws_state = state_clone.clone();
                                         let ws_backend = backend_url_clone;
                                         tokio::spawn(async move {
-                                            if let Err(e) = run_ws_client(ws_state, ws_backend).await {
-                                                tracing::error!("WS client died: {e}");
-                                            }
+                                            let _ = run_ws_client(ws_state, ws_backend).await;
                                         });
-
-                                        tracing::info!("Token saved and WS client started. Sending ACK.");
                                         let _ = stream.write_all(b"ACK").await;
-                                    } else {
-                                        tracing::error!("Failed to save token to keyring");
                                     }
-                                } else {
-                                    tracing::warn!("Received unrecognized IPC message");
                                 }
                             }
                         });
                     }
                 }
-            } else {
-                tracing::error!("Failed to bind IPC listener");
             }
         }
     });
 
-    // We no longer auto-open the web app on launch,
-    // we rely on the native egui window to show status.
-
-    // Local HTTP Server for auto-pairing
     tokio::spawn({
         let state_http = state.clone();
         let config_dir_http = config_dir.clone();
         let backend_url_http = backend_url.clone();
+        let status_tx_http = status_tx.clone();
         async move {
             use axum::{routing::{get, post}, Router, Json, http::Method};
             use tower_http::cors::{CorsLayer, Any};
@@ -401,13 +404,10 @@ async fn background_daemon_task(
                             st.device_id = Some(token.clone());
                             let _ = st.save(&c).await;
                             
-                            // Start WS client
                             let ws_state = s.clone();
                             let ws_backend = b.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = run_ws_client(ws_state, ws_backend).await {
-                                    tracing::error!("WS client died: {e}");
-                                }
+                                let _ = run_ws_client(ws_state, ws_backend).await;
                             });
                             Json(PairRes { success: true })
                         } else {
@@ -417,35 +417,42 @@ async fn background_daemon_task(
                 }))
                 .layer(cors);
 
-            if let Ok(listener) = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await {
-                tracing::info!("Local HTTP server running on port {}", local_port);
-                let _ = axum::serve(listener, app).await;
+            match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", local_port)).await {
+                Ok(listener) => {
+                    tracing::info!("Local HTTP server running on port {}", local_port);
+                    let _ = axum::serve(listener, app).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to bind local server on port {}: {}", local_port, e);
+                    let _ = status_tx_http.send(format!("Error: No se pudo abrir el puerto local {} ({})", local_port, e));
+                }
             }
         }
     });
 
-    // Spawn WS client if already paired
     if is_paired {
         let ws_state = state.clone();
         let ws_backend = backend_url.clone();
+        let status_tx_ws = status_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_ws_client(ws_state, ws_backend).await {
-                tracing::error!("WS client died: {e}");
+            let _ = status_tx_ws.send("Conectando al servidor web...".into());
+            match run_ws_client(ws_state, ws_backend).await {
+                Ok(_) => {
+                    let _ = status_tx_ws.send("Desconectado de la web".into());
+                }
+                Err(e) => {
+                    tracing::error!("WS client died: {e}");
+                    let _ = status_tx_ws.send(format!("Error WS: {}", e));
+                }
             }
         });
+    } else {
+        let _ = status_tx.send("Listo para emparejar (abre la web)".into());
     }
 
-    let (_tray_handle, quit_rx) = tray::build_tray(state.clone(), config_dir.clone(), local_port, ui_ctx.clone())?;
-    tracing::info!("Daemon background tasks running.");
-    
-    // Update status to let UI know
-    let _ = status_tx.send("Conectado (esperando eventos...)".to_string());
-    tracing::info!("Daemon background tasks running.");
-    
-    // Block the tokio thread until quit signal
-    _ = quit_rx.await;
+    // Wait until user quits
+    let _ = quit_rx.await;
     tracing::info!("tokio background daemon exiting");
-    Ok(())
 }
 
 async fn run_ws_client(state: Arc<RwLock<DaemonState>>, backend_url: String) -> Result<()> {
