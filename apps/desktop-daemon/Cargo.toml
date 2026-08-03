@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/synthhires/bridge"
@@ -26,6 +26,10 @@ eframe = "0.29"
 egui = "0.29"
 notify-rust = "4.11"
 interprocess = { version = "2.2", features = ["tokio"] }
+
+# HTTP Server
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }

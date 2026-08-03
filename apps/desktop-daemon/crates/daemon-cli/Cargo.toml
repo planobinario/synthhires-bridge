@@ -21,6 +21,8 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tungstenite = { workspace = true }
 futures-util = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 eframe = { workspace = true }
@@ -43,6 +45,3 @@ dirs-next = "2"
 open = "5"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security"] }
-winit = "0.30"
-axum = "0.8.9"
-tower-http = { version = "0.7.0", features = ["cors"] }

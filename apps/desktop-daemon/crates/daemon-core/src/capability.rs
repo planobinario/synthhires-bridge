@@ -12,7 +12,7 @@
 //! `/home/u/workspace/`.
 
 use daemon_protocol::Scopes;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -81,18 +81,34 @@ impl CapabilityGate {
     }
 
     fn path_matches_any(&self, path: &Path) -> bool {
-        let normalised = path.to_string_lossy().replace('\\', "/");
+        let normalised = strip_trailing_sep(path);
         for prefix in &self.snapshot.always_allow_paths {
-            let mut p = prefix.to_string_lossy().replace('\\', "/");
-            if !p.ends_with('/') {
-                p.push('/');
+            let p = strip_trailing_sep(prefix);
+            if normalised == p {
+                return true;
             }
-            if normalised == p.trim_end_matches('/') || normalised.starts_with(&p) {
+            if normalised.starts_with(strip_trailing_sep_with_sep(&p)) {
                 return true;
             }
         }
         false
     }
+}
+
+fn strip_trailing_sep(p: &Path) -> PathBuf {
+    let mut out = p.to_path_buf();
+    while matches!(out.components().last(), Some(Component::Normal(_)) | None)
+        && out.ends_with(std::path::MAIN_SEPARATOR.to_string())
+    {
+        out.pop();
+    }
+    out
+}
+
+fn strip_trailing_sep_with_sep(p: &Path) -> PathBuf {
+    let mut out = strip_trailing_sep(p);
+    out.push(std::path::MAIN_SEPARATOR_STR);
+    out
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
 
 use crate::{capability::{CapabilityGate, ScopeSnapshot}, Result};
 use daemon_protocol::{
-    BridgeFrame, HelloFrame, PROTOCOL_VERSION,
+    BridgeFrame, HelloFrame, PROTOCOL_VERSION, Scopes,
 };
 use futures_util::{SinkExt, StreamExt};
 use sha2::Digest;
@@ -27,12 +27,11 @@ use tokio_tungstenite::{
 pub struct WsClient {
     backend_url: String,
     token: String,
-    _device_id: String,
+    device_id: String,
     fingerprint: String,
     device_kind: &'static str,
     device_name: String,
     gate: std::sync::Arc<Mutex<CapabilityGate>>,
-    status_tx: Option<tokio::sync::watch::Sender<String>>,
 }
 
 impl WsClient {
@@ -44,17 +43,15 @@ impl WsClient {
         device_kind: &'static str,
         device_name: impl Into<String>,
         gate: CapabilityGate,
-        status_tx: Option<tokio::sync::watch::Sender<String>>,
     ) -> Self {
         Self {
             backend_url: backend_url.into(),
             token: token.into(),
-            _device_id: device_id.into(),
+            device_id: device_id.into(),
             fingerprint: fingerprint.into(),
             device_kind,
             device_name: device_name.into(),
             gate: std::sync::Arc::new(Mutex::new(gate)),
-            status_tx,
         }
     }
 
@@ -72,16 +69,10 @@ impl WsClient {
                 Err(crate::DaemonError::Protocol(msg))
                     if msg.contains("auth_failed") || msg.contains("revoked") =>
                 {
-                    if let Some(ref tx) = self.status_tx {
-                        let _ = tx.send("Error: Token revocado o invalido".into());
-                    }
                     return Err(crate::DaemonError::Protocol(msg));
                 }
                 Err(e) => {
                     tracing::warn!("WS error: {e}; reconnecting in {:?}", backoff);
-                    if let Some(ref tx) = self.status_tx {
-                        let _ = tx.send(format!("Error: Reconectando en {}s...", backoff.as_secs()));
-                    }
                 }
             }
             tokio::time::sleep(backoff).await;
@@ -140,10 +131,6 @@ impl WsClient {
         let scopes = ScopeSnapshot::from(&ack.scopes);
         *g = CapabilityGate::new(scopes);
         drop(g);
-
-        if let Some(ref tx) = self.status_tx {
-            let _ = tx.send("Conectado (esperando eventos...)".into());
-        }
 
         // Loop: heartbeat every 30s, dispatch incoming actions.
         let mut heartbeat = tokio::time::interval(Duration::from_millis(30_000));
@@ -216,11 +203,24 @@ impl WsClient {
         >,
         req: daemon_protocol::ActionRequestFrame,
     ) -> Result<()> {
-        // Per-action consent: if the gate says RequireConsent and the
-        // server didn't set skip_consent_prompt, we MUST prompt the
-        // user via the native dialog. This is implemented in the
-        // Tauri-based tray UI; here we conservatively DENY when
-        // consent is required and the server didn't skip it.
+        // 1. Audit Log (Local inmutable record)
+        let config_dir = directories::ProjectDirs::from("com", "synthhires", "bridge")
+            .map(|d| d.config_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join("synthhires-bridge")
+            });
+        let audit_log_path = config_dir.join("audit.log");
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let params_str = serde_json::to_string(&req.params).unwrap_or_default();
+        let log_entry = format!("[{}] CAPABILITY: {} PARAMS: {}\n", timestamp, req.capability, params_str);
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&audit_log_path) {
+            use std::io::Write;
+            let _ = file.write_all(log_entry.as_bytes());
+        }
+
+        // 2. Capability Gate Check
         let g = self.gate.lock().await;
         let allowed = g.allows(&req.capability);
         drop(g);
@@ -243,27 +243,48 @@ impl WsClient {
                 .await?;
             return Ok(());
         }
-        // For shell.execute specifically, prompt every time. The Tauri
-        // UI implements the dialog and sets skip_consent_prompt=false;
-        // we honour that. In this CLI-only scaffold we accept the
-        // command if the user has added it to alwaysAllowPaths,
-        // otherwise we deny.
-        if req.capability == "desktop.shell.execute" && !req.skip_consent_prompt {
-            let result = daemon_protocol::ActionResultFrame {
-                v: PROTOCOL_VERSION,
-                id: req.id,
-                ok: false,
-                output: None,
-                error: Some(daemon_protocol::ActionError {
-                    code: "consent_required".into(),
-                    message: "Esta acción requiere confirmación en la UI del daemon.".into(),
-                }),
-                duration_ms: 0,
-            };
-            ws.send(Message::Text(serde_json::to_string(&BridgeFrame::ActionResult(result))?))
-                .await?;
-            return Ok(());
+
+        // 3. Hard-Stops for Destructive Commands (DPI)
+        if req.capability == "desktop.shell.execute" {
+            let cmd = req.params.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let dangerous_patterns = ["sudo ", "rm -rf", "del /f /s /q", "mkfs", "chmod -R 777", "chown -R"];
+            for pattern in dangerous_patterns {
+                if cmd.contains(pattern) {
+                    tracing::error!("Hard-stop triggered for dangerous command: {}", cmd);
+                    let result = daemon_protocol::ActionResultFrame {
+                        v: PROTOCOL_VERSION,
+                        id: req.id,
+                        ok: false,
+                        output: None,
+                        error: Some(daemon_protocol::ActionError {
+                            code: "hard_stop_blocked".into(),
+                            message: format!("El comando contiene patrones destructivos prohibidos por seguridad ('{}').", pattern),
+                        }),
+                        duration_ms: 0,
+                    };
+                    ws.send(Message::Text(serde_json::to_string(&BridgeFrame::ActionResult(result))?)).await?;
+                    return Ok(());
+                }
+            }
+
+            if !req.skip_consent_prompt {
+                let result = daemon_protocol::ActionResultFrame {
+                    v: PROTOCOL_VERSION,
+                    id: req.id,
+                    ok: false,
+                    output: None,
+                    error: Some(daemon_protocol::ActionError {
+                        code: "consent_required".into(),
+                        message: "Esta acción requiere confirmación en la UI del daemon.".into(),
+                    }),
+                    duration_ms: 0,
+                };
+                ws.send(Message::Text(serde_json::to_string(&BridgeFrame::ActionResult(result))?))
+                    .await?;
+                return Ok(());
+            }
         }
+
         // Capability-specific execution is delegated to the daemon-
         // core modules by the upper layer (the Tauri UI). In the
         // CLI scaffold we just acknowledge.
