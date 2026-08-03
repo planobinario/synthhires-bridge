@@ -15,7 +15,7 @@ use crate::DaemonState;
 pub struct ServerState {
     pub daemon_state: Arc<RwLock<DaemonState>>,
     pub config_dir: std::path::PathBuf,
-    pub backend_url: String,
+    pub _backend_url: String,
     pub pairing_nonce: Arc<RwLock<Option<String>>>,
 }
 

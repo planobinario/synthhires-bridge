@@ -75,9 +75,9 @@ jobs:
       - name: Prepare binaries
         run: |
           mkdir release_assets
-          cp artifacts/synthhires-bridge-windows-latest/synthhires-bridge.exe release_assets/synthhires-bridge-windows-v13.exe
-          cp artifacts/synthhires-bridge-macos-latest/synthhires-bridge release_assets/synthhires-bridge-macos-v13
-          cp artifacts/synthhires-bridge-ubuntu-latest/synthhires-bridge release_assets/synthhires-bridge-linux-v13
+          cp artifacts/synthhires-bridge-windows-latest/synthhires-bridge.exe release_assets/synthhires-bridge-windows-v14.exe
+          cp artifacts/synthhires-bridge-macos-latest/synthhires-bridge release_assets/synthhires-bridge-macos-v14
+          cp artifacts/synthhires-bridge-ubuntu-latest/synthhires-bridge release_assets/synthhires-bridge-linux-v14
       - name: Publish Edge Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

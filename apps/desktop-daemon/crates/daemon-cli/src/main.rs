@@ -376,7 +376,7 @@ async fn background_daemon_task(
         let server_state = server::ServerState {
             daemon_state: state.clone(),
             config_dir: config_dir.clone(),
-            backend_url: backend_url.clone(),
+            _backend_url: backend_url.clone(),
             pairing_nonce: Arc::new(tokio::sync::RwLock::new(None)),
         };
         async move {
