@@ -13,7 +13,7 @@
 
 use crate::{capability::{CapabilityGate, ScopeSnapshot}, Result};
 use daemon_protocol::{
-    BridgeFrame, HelloFrame, PROTOCOL_VERSION, Scopes,
+    BridgeFrame, HelloFrame, PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
 use sha2::Digest;
@@ -27,7 +27,7 @@ use tokio_tungstenite::{
 pub struct WsClient {
     backend_url: String,
     token: String,
-    device_id: String,
+    _device_id: String,
     fingerprint: String,
     device_kind: &'static str,
     device_name: String,

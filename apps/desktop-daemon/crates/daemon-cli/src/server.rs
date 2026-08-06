@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{Method, StatusCode, header},
     routing::{get, post},
     Json, Router,
 };
@@ -16,7 +16,7 @@ pub struct ServerState {
     pub daemon_state: Arc<RwLock<DaemonState>>,
     pub config_dir: std::path::PathBuf,
     pub _backend_url: String,
-    pub pairing_nonce: Arc<RwLock<Option<String>>>,
+    pub pairing_nonce: Arc<RwLock<Option<(String, std::time::Instant)>>>,
 }
 
 #[derive(Serialize)]
@@ -41,7 +41,7 @@ pub async fn start_http_server(
         let is_paired = state.daemon_state.read().await.device_id.is_some();
         if !is_paired {
             let mut w = state.pairing_nonce.write().await;
-            *w = Some(uuid::Uuid::new_v4().to_string());
+            *w = Some((uuid::Uuid::new_v4().to_string(), std::time::Instant::now()));
         }
     }
 
@@ -71,31 +71,53 @@ pub async fn start_http_server(
     Ok(())
 }
 
-async fn handle_status(State(state): State<ServerState>) -> Json<StatusResponse> {
+fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if origin != "https://app.synthhires.com" && origin != "http://localhost:4321" && origin != "http://127.0.0.1:4321" {
+        tracing::warn!("Rejecting request from invalid origin: {}", origin);
+        return Err((StatusCode::FORBIDDEN, "Invalid Origin"));
+    }
+    Ok(())
+}
+
+async fn handle_status(
+    headers: axum::http::HeaderMap,
+    State(state): State<ServerState>,
+) -> Result<Json<StatusResponse>, (StatusCode, &'static str)> {
+    check_origin(&headers)?;
     let is_paired = state.daemon_state.read().await.device_id.is_some();
     
     // Si ya está emparejado, no exponemos nonce.
-    // Si no está emparejado y no hay nonce, lo creamos.
+    // Si no está emparejado, comprobamos el TTL del nonce. Si expira o no hay, creamos uno nuevo.
     let nonce = if !is_paired {
         let mut n = state.pairing_nonce.write().await;
-        if n.is_none() {
-            *n = Some(uuid::Uuid::new_v4().to_string());
+        let now = std::time::Instant::now();
+        if let Some((_, created_at)) = &*n {
+            if now.duration_since(*created_at) > std::time::Duration::from_secs(120) {
+                // Expired
+                *n = None;
+            }
         }
-        n.clone()
+        if n.is_none() {
+            *n = Some((uuid::Uuid::new_v4().to_string(), now));
+        }
+        n.as_ref().map(|(val, _)| val.clone())
     } else {
         None
     };
 
-    Json(StatusResponse {
+    Ok(Json(StatusResponse {
         paired: is_paired,
         nonce,
-    })
+    }))
 }
 
 async fn handle_pair(
+    headers: axum::http::HeaderMap,
     State(state): State<ServerState>,
     Json(payload): Json<PairRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    check_origin(&headers)?;
     let is_paired = state.daemon_state.read().await.device_id.is_some();
     if is_paired {
         return Err((StatusCode::CONFLICT, "Already paired"));
@@ -104,8 +126,14 @@ async fn handle_pair(
     // Validar el Nonce
     {
         let mut n = state.pairing_nonce.write().await;
-        if n.as_deref() != Some(payload.nonce.as_str()) {
-            tracing::warn!("Rejecting /pair request: invalid or missing nonce");
+        let valid = match &*n {
+            Some((val, created_at)) => {
+                val == &payload.nonce && std::time::Instant::now().duration_since(*created_at) <= std::time::Duration::from_secs(120)
+            }
+            None => false,
+        };
+        if !valid {
+            tracing::warn!("Rejecting /pair request: invalid, expired, or missing nonce");
             return Err((StatusCode::FORBIDDEN, "Invalid nonce"));
         }
         // Consumir el nonce para que no se pueda reusar (previene replay attacks)

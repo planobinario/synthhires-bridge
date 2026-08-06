@@ -81,6 +81,12 @@ impl CapabilityGate {
     }
 
     fn path_matches_any(&self, path: &Path) -> bool {
+        // Defensa 1: Bloquear traversal (..)
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return false;
+        }
+
+        // Defensa 2: Verificar prefijo válido por componente
         for prefix in &self.snapshot.always_allow_paths {
             if path.starts_with(prefix) {
                 return true;
@@ -138,6 +144,15 @@ mod tests {
         let g = gate_with_paths(&["/home/u/workspace"]);
         assert_eq!(
             g.check_path("desktop.fs.read", Path::new("/home/u/workspace-evil/file")),
+            GateDecision::RequireConsent
+        );
+    }
+
+    #[test]
+    fn denies_path_traversal() {
+        let g = gate_with_paths(&["/home/u/workspace"]);
+        assert_eq!(
+            g.check_path("desktop.fs.read", Path::new("/home/u/workspace/../etc/passwd")),
             GateDecision::RequireConsent
         );
     }
