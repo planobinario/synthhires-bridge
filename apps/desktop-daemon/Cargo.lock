@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-protocol"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rand 0.8.7",
  "serde",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "synthhires-bridge"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "axum",
  "chrono",

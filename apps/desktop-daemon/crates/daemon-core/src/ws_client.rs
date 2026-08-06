@@ -47,7 +47,7 @@ impl WsClient {
         Self {
             backend_url: backend_url.into(),
             token: token.into(),
-            device_id: device_id.into(),
+            _device_id: device_id.into(),
             fingerprint: fingerprint.into(),
             device_kind,
             device_name: device_name.into(),
