@@ -49,7 +49,7 @@ pub async fn start_http_server(
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
             let o = origin.as_bytes();
-            o == b"https://app.synthhires.com" || o == b"http://localhost:4321" || o == b"http://127.0.0.1:4321"
+            o == b"https://app.synthhires.com" || o == b"http://localhost:4321" || o == b"http://127.0.0.1:4321" || o == b"http://localhost:8787" || o == b"http://127.0.0.1:8787"
         }))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE])
@@ -73,7 +73,7 @@ pub async fn start_http_server(
 
 fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'static str)> {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if origin != "https://app.synthhires.com" && origin != "http://localhost:4321" && origin != "http://127.0.0.1:4321" {
+    if origin != "https://app.synthhires.com" && origin != "http://localhost:4321" && origin != "http://127.0.0.1:4321" && origin != "http://localhost:8787" && origin != "http://127.0.0.1:8787" {
         tracing::warn!("Rejecting request from invalid origin: {}", origin);
         return Err((StatusCode::FORBIDDEN, "Invalid Origin"));
     }
