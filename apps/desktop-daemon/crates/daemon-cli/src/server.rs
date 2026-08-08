@@ -17,6 +17,9 @@ pub struct ServerState {
     pub config_dir: std::path::PathBuf,
     pub _backend_url: String,
     pub pairing_nonce: Arc<RwLock<Option<(String, std::time::Instant)>>>,
+    pub status_tx: tokio::sync::watch::Sender<String>,
+    pub last_poll: Arc<std::sync::atomic::AtomicU64>,
+    pub ws_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +88,12 @@ async fn handle_status(
     State(state): State<ServerState>,
 ) -> Result<Json<StatusResponse>, (StatusCode, &'static str)> {
     check_origin(&headers)?;
+    // Registrar el poll del frontend para saber que la UI está abierta
+    state.last_poll.store(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        std::sync::atomic::Ordering::Relaxed
+    );
+
     let is_paired = state.daemon_state.read().await.device_id.is_some();
     
     // Si ya está emparejado, no exponemos nonce.
@@ -151,16 +160,24 @@ async fn handle_pair(
     {
         let mut s = state.daemon_state.write().await;
         s.device_id = Some(payload.token.clone());
+        s.backend_url = Some(payload.backend_url.clone());
         let _ = s.save(&state.config_dir).await;
     }
 
     // Iniciar el WS Client de forma asíncrona
     let ws_state = state.daemon_state.clone();
-    tokio::spawn(async move {
+    let status_tx = state.status_tx.clone();
+    let mut hw = state.ws_handle.lock().await;
+    if let Some(h) = hw.take() {
+        h.abort();
+    }
+    *hw = Some(tokio::spawn(async move {
+        let _ = status_tx.send("Conectando al servidor...".to_string());
         if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url).await {
             tracing::error!("WS client died: {e}");
+            let _ = status_tx.send(format!("Error de conexión: {e}"));
         }
-    });
+    }));
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

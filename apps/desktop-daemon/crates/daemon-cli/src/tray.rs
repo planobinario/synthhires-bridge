@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 
@@ -15,10 +14,11 @@ pub struct TrayHandle {
 }
 
 pub fn build_tray(
-    state: Arc<RwLock<DaemonState>>,
-    config_dir: std::path::PathBuf,
-    port: u16,
+    _state: Arc<RwLock<DaemonState>>,
+    _config_dir: std::path::PathBuf,
+    _port: u16,
     ui_ctx: Arc<RwLock<Option<eframe::egui::Context>>>,
+    ui_cmd_tx: tokio::sync::mpsc::Sender<crate::UiCmd>,
 ) -> Result<(TrayHandle, tokio::sync::oneshot::Receiver<()>)> {
     let (quit_tx, quit_rx) = oneshot::channel();
     let icon = load_icon();
@@ -38,7 +38,7 @@ pub fn build_tray(
     menu.append(show_window_item).ok();
 
     let disconnect_item: &'static MenuItem =
-        Box::leak(Box::new(MenuItem::new("🔌 Desconectar", true, None)));
+        Box::leak(Box::new(MenuItem::new("🔌 Desvincular Dispositivo", true, None)));
     let disconnect_id = disconnect_item.id();
     menu.append(disconnect_item).ok();
 
@@ -89,7 +89,12 @@ pub fn build_tray(
             }
 
             if event.id == disconnect_id {
-                tracing::info!("Disconnect requested from tray.");
+                let rt = tokio::runtime::Handle::try_current();
+                if let Ok(rt) = rt {
+                    rt.block_on(async {
+                        let _ = ui_cmd_tx.send(crate::UiCmd::Unpair).await;
+                    });
+                }
             }
         }
     });
