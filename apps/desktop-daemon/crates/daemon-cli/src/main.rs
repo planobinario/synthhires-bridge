@@ -93,7 +93,23 @@ pub struct UiLogger {
 impl std::io::Write for UiLogger {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let msg = String::from_utf8_lossy(buf).to_string();
-        let _ = self.tx.try_send(msg);
+        
+        // Strip ANSI color codes
+        let mut clean_msg = String::with_capacity(msg.len());
+        let mut in_escape = false;
+        for c in msg.chars() {
+            if c == '\x1b' {
+                in_escape = true;
+            } else if in_escape {
+                if c.is_ascii_alphabetic() {
+                    in_escape = false;
+                }
+            } else {
+                clean_msg.push(c);
+            }
+        }
+        
+        let _ = self.tx.try_send(clean_msg);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
@@ -118,7 +134,7 @@ fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("info,daemon_core=debug")
+                    tracing_subscriber::EnvFilter::new("synthhires_bridge=debug,daemon_core=debug,daemon_protocol=debug")
                 }),
         )
         .with_writer(both)
@@ -419,8 +435,6 @@ async fn background_daemon_task(
                         let state_clone = state_ipc.clone();
                         let backend_url_clone = backend_url_ipc.clone();
                         let config_dir_clone = config_dir_ipc.clone();
-                        let web_url_clone = web_url_ipc.clone();
-                        let last_poll_clone = last_poll_ipc.clone();
                         let ws_handle_clone = ws_handle_ipc.clone();
                         
                         tokio::spawn(async move {
@@ -433,11 +447,7 @@ async fn background_daemon_task(
                                     let clean_uri = uri.trim_end_matches('/').trim();
                                     
                                     if clean_uri == "ping-ui" {
-                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                                        let last = last_poll_clone.load(std::sync::atomic::Ordering::Relaxed);
-                                        if now > last + 5 {
-                                            let _ = open::that(&web_url_clone);
-                                        }
+                                        // Auto-open disabled intentionally by user request
                                         let _ = stream.write_all(b"ACK").await;
                                         return;
                                     }

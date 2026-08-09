@@ -84,6 +84,7 @@ impl WsClient {
     }
 
     async fn connect_once(&self) -> Result<()> {
+        tracing::info!("Attempting WS connection to URL: {}", self.backend_url);
         let mut req = self.backend_url.clone().into_client_request().map_err(|e| crate::DaemonError::Ws(format!("into_client_request: {e}")))?;
         req.headers_mut()
             .insert("Sec-WebSocket-Protocol", format!("bearer.{}", self.token).parse().map_err(|e: http::header::InvalidHeaderValue| crate::DaemonError::Ws(format!("invalid header: {e}")))?);

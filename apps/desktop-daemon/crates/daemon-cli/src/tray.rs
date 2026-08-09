@@ -79,10 +79,11 @@ pub fn build_tray(
                     rt.block_on(async {
                         let ctx = ui_ctx.read().await;
                         if let Some(ctx) = ctx.as_ref() {
+                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
                             // Also ensure it's not minimized
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(eframe::egui::vec2(400.0, 500.0)));
-                            tracing::info!("Focus command sent to UI");
+                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(eframe::egui::vec2(700.0, 500.0)));
+                            tracing::info!("Visible and Focus commands sent to UI");
                         }
                     });
                 }
