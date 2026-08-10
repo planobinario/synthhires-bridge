@@ -45,3 +45,4 @@ dirs-next = "2"
 open = "5"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security"] }
+url = "2.5.8"

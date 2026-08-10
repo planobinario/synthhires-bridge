@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-core"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "daemon-protocol"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "rand 0.8.7",
  "serde",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "synthhires-bridge"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "axum",
  "chrono",
@@ -4964,6 +4964,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "tungstenite",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
  "winres",
