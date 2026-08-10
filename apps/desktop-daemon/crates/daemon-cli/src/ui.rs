@@ -348,11 +348,21 @@ impl eframe::App for BridgeApp {
                             self.show_quit_confirm = true;
                         }
                         
-                        let unpair_fill = if self.dark_mode { egui::Color32::from_rgb(50, 25, 25) } else { egui::Color32::from_rgb(255, 230, 230) };
-                        let unpair_btn = egui::Button::new(egui::RichText::new("Desvincular Dispositivo").color(egui::Color32::from_rgb(220, 80, 80)))
-                            .fill(unpair_fill);
-                        if ui.add(unpair_btn).clicked() {
-                            self.show_unpair_confirm = true;
+                        let is_waiting = self.status_rx.borrow().contains("Esperando emparejamiento");
+                        if is_waiting {
+                            let pair_fill = if self.dark_mode { egui::Color32::from_rgb(20, 50, 20) } else { egui::Color32::from_rgb(220, 255, 220) };
+                            let pair_btn = egui::Button::new(egui::RichText::new("🔗 Vincular con SynthHires").color(egui::Color32::from_rgb(50, 180, 50)).strong())
+                                .fill(pair_fill);
+                            if ui.add(pair_btn).clicked() {
+                                let _ = self.ui_cmd_tx.try_send(UiCmd::OpenDashboard);
+                            }
+                        } else {
+                            let unpair_fill = if self.dark_mode { egui::Color32::from_rgb(50, 25, 25) } else { egui::Color32::from_rgb(255, 230, 230) };
+                            let unpair_btn = egui::Button::new(egui::RichText::new("Desvincular Dispositivo").color(egui::Color32::from_rgb(220, 80, 80)))
+                                .fill(unpair_fill);
+                            if ui.add(unpair_btn).clicked() {
+                                self.show_unpair_confirm = true;
+                            }
                         }
                     });
                 });

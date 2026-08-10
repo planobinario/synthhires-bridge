@@ -173,7 +173,8 @@ async fn handle_pair(
     }
     *hw = Some(tokio::spawn(async move {
         let _ = status_tx.send("Conectando al servidor...".to_string());
-        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url).await {
+        let tx_for_ws = status_tx.clone();
+        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, tx_for_ws).await {
             tracing::error!("WS client died: {e}");
             let _ = status_tx.send(format!("Error de conexión: {e}"));
         }

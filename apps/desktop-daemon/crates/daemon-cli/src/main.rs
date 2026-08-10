@@ -370,9 +370,8 @@ async fn background_daemon_task(
         let config_dir_ipc = config_dir.clone();
         let backend_url_ipc = backend_url.clone();
         let state_ipc = state.clone();
-        let web_url_ipc = web_url.clone();
-        let last_poll_ipc = last_poll.clone();
         let ws_handle_ipc = ws_handle.clone();
+        let status_tx_ipc = status_tx.clone();
         
         async move {
             use interprocess::local_socket::prelude::*;
@@ -436,6 +435,7 @@ async fn background_daemon_task(
                         let backend_url_clone = backend_url_ipc.clone();
                         let config_dir_clone = config_dir_ipc.clone();
                         let ws_handle_clone = ws_handle_ipc.clone();
+                        let status_tx_clone = status_tx_ipc.clone();
                         
                         tokio::spawn(async move {
                             let mut buf = [0u8; 1024];
@@ -473,8 +473,11 @@ async fn background_daemon_task(
                                             h.abort();
                                         }
                                         *hw = Some(tokio::spawn(async move {
-                                            if let Err(e) = run_ws_client(ws_state, ws_backend).await {
+                                            let _ = status_tx_clone.send("Conectando al servidor...".to_string());
+                                            let tx_for_ws = status_tx_clone.clone();
+                                            if let Err(e) = run_ws_client(ws_state, ws_backend, tx_for_ws).await {
                                                 tracing::error!("WS client died: {e}");
+                                                let _ = status_tx_clone.send(format!("Error de conexión: {e}"));
                                             }
                                         }));
 
@@ -508,7 +511,8 @@ async fn background_daemon_task(
         let mut hw = ws_handle.try_lock().expect("No lock contention at startup");
         *hw = Some(tokio::spawn(async move {
             let _ = status_tx_clone.send("Conectando al servidor...".to_string());
-            if let Err(e) = run_ws_client(ws_state, ws_backend).await {
+            let tx_for_ws = status_tx_clone.clone();
+            if let Err(e) = run_ws_client(ws_state, ws_backend, tx_for_ws).await {
                 tracing::error!("WS client died: {e}");
                 let _ = status_tx_clone.send(format!("Error de conexión: {e}"));
             }
@@ -546,7 +550,11 @@ async fn background_daemon_task(
     Ok(())
 }
 
-async fn run_ws_client(state: Arc<RwLock<DaemonState>>, backend_url: String) -> Result<()> {
+async fn run_ws_client(
+    state: Arc<RwLock<DaemonState>>,
+    backend_url: String,
+    status_tx: tokio::sync::watch::Sender<String>,
+) -> Result<()> {
     let device_id = {
         let s = state.read().await;
         s.device_id
@@ -569,6 +577,7 @@ async fn run_ws_client(state: Arc<RwLock<DaemonState>>, backend_url: String) -> 
         "desktop",
         hostname(),
         gate,
+        Some(status_tx),
     );
     ws.run().await
 }

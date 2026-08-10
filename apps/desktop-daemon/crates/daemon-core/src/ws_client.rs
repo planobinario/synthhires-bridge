@@ -32,6 +32,7 @@ pub struct WsClient {
     device_kind: &'static str,
     device_name: String,
     gate: std::sync::Arc<Mutex<CapabilityGate>>,
+    status_tx: Option<tokio::sync::watch::Sender<String>>,
 }
 
 impl WsClient {
@@ -43,6 +44,7 @@ impl WsClient {
         device_kind: &'static str,
         device_name: impl Into<String>,
         gate: CapabilityGate,
+        status_tx: Option<tokio::sync::watch::Sender<String>>,
     ) -> Self {
         Self {
             backend_url: backend_url.into(),
@@ -52,6 +54,7 @@ impl WsClient {
             device_kind,
             device_name: device_name.into(),
             gate: std::sync::Arc::new(Mutex::new(gate)),
+            status_tx,
         }
     }
 
@@ -134,6 +137,10 @@ impl WsClient {
         let scopes = ScopeSnapshot::from(&ack.scopes);
         *g = CapabilityGate::new(scopes);
         drop(g);
+
+        if let Some(tx) = &self.status_tx {
+            let _ = tx.send("● Conectado (esperando eventos...)".to_string());
+        }
 
         // Loop: heartbeat every 30s, dispatch incoming actions.
         let mut heartbeat = tokio::time::interval(Duration::from_millis(30_000));
