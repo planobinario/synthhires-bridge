@@ -468,21 +468,37 @@ async fn background_daemon_task(
                                     }
                                     
                                     // Handle `pair?token=...` or `...` directly
-                                    let clean_token = if let Some(t) = clean_uri.strip_prefix("pair?token=") {
-                                        t
-                                    } else {
-                                        clean_uri
-                                    };
-                                    
+                                    let mut final_token = clean_uri.to_string();
+                                    let mut final_backend = backend_url_clone.clone();
+
+                                    if let Ok(parsed_url) = url::Url::parse(&format!("synthhires://{}", clean_uri)) {
+                                        for (k, v) in parsed_url.query_pairs() {
+                                            if k == "token" {
+                                                final_token = v.to_string();
+                                            } else if k == "backend_url" {
+                                                final_backend = v.to_string();
+                                            }
+                                        }
+                                    } else if let Some(t) = clean_uri.strip_prefix("pair?token=") {
+                                        // Fallback manual parsing if url crate fails
+                                        let parts: Vec<&str> = t.split("&backend_url=").collect();
+                                        final_token = parts[0].to_string();
+                                        if parts.len() > 1 {
+                                            final_backend = parts[1].to_string();
+                                        }
+                                    }
+
+                                    let clean_token = final_token.as_str();
                                     tracing::info!("Processing deep link token: {}", clean_token);
                                     if let Ok(_) = daemon_core::keyring::TokenStore::save(clean_token, clean_token) {
                                         let mut s = state_clone.write().await;
                                         s.device_id = Some(clean_token.to_string());
+                                        s.backend_url = Some(final_backend.clone());
                                         let _ = s.save(&config_dir_clone).await;
                                         
                                         // Start WS client
                                         let ws_state = state_clone.clone();
-                                        let ws_backend = backend_url_clone;
+                                        let ws_backend = final_backend;
                                         let mut hw = ws_handle_clone.lock().await;
                                         if let Some(h) = hw.take() {
                                             h.abort();
