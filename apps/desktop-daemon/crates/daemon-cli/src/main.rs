@@ -140,6 +140,13 @@ fn main() -> Result<()> {
         .with_writer(both)
         .init();
 
+    tracing::info!("========================================");
+    tracing::info!("🚀 SynthHires Bridge - v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("🛡️ Proceso en Segundo Plano (Daemon)");
+    tracing::info!("📡 Misión: Sincronizar de forma segura agentes de IA con tu PC local.");
+    tracing::info!("⚡ Protocolo: Zero-Click Pairing en puerto 7333 activado.");
+    tracing::info!("========================================");
+
     // Spawn Tokio in a separate background thread so it doesn't block the UI
     let (status_tx, status_rx) = tokio::sync::watch::channel("Iniciando...".to_string());
     let (tasks_tx, tasks_rx) = tokio::sync::watch::channel(Vec::new());

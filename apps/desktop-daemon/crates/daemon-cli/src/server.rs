@@ -52,21 +52,30 @@ pub async fn start_http_server(
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
             let o = origin.as_bytes();
-            o == b"https://app.synthhires.com" || o == b"http://localhost:4321" || o == b"http://127.0.0.1:4321" || o == b"http://localhost:8787" || o == b"http://127.0.0.1:8787"
+            o == b"https://app.synthhires.com" 
+                || o.starts_with(b"http://localhost:") 
+                || o.starts_with(b"http://127.0.0.1:")
+                || o == b"http://localhost"
+                || o == b"http://127.0.0.1"
         }))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE])
         // Cabecera esencial para PNA en navegadores basados en Chromium
         .allow_private_network(true);
 
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    tracing::info!("Starting secure local HTTP server on {}", addr);
+    
+    let is_paired = state.daemon_state.read().await.device_id.is_some();
+    if !is_paired {
+        tracing::info!("Daemon is waiting for pairing. Please open the web app Dashboard or click 'Vincular' in the UI.");
+    }
+
     let app = Router::new()
         .route("/status", get(handle_status))
         .route("/pair", post(handle_pair))
         .layer(cors)
         .with_state(state);
-
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    tracing::info!("Starting secure local HTTP server on {}", addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
