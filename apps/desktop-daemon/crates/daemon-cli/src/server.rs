@@ -92,9 +92,10 @@ fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'st
         || origin == "http://127.0.0.1";
         
     if !is_valid {
-        tracing::warn!("Rejecting request from invalid origin: {}", origin);
+        tracing::warn!("[TELEMETRY] CORS REJECTED: HTTP request from origin '{}' is not in the whitelist.", origin);
         return Err((StatusCode::FORBIDDEN, "Invalid Origin"));
     }
+    tracing::debug!("[TELEMETRY] CORS ALLOWED: Origin '{}'", origin);
     Ok(())
 }
 
@@ -103,6 +104,7 @@ async fn handle_status(
     State(state): State<ServerState>,
 ) -> Result<Json<StatusResponse>, (StatusCode, &'static str)> {
     check_origin(&headers)?;
+    tracing::debug!("[TELEMETRY] Incoming /status request. Updating last_poll.");
     // Registrar el poll del frontend para saber que la UI está abierta
     state.last_poll.store(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
@@ -164,19 +166,28 @@ async fn handle_pair(
         *n = None;
     }
 
-    tracing::info!("Valid pairing request received via local HTTP. Token handoff starting...");
+    tracing::info!("[TELEMETRY] Valid pairing request received via local HTTP. Token handoff starting...");
+    tracing::debug!("[TELEMETRY] /pair Payload -> backend_url: {}, nonce: {}", payload.backend_url, payload.nonce);
 
     // Guardar token en el llavero local (Keyring)
-    if daemon_core::keyring::TokenStore::save(&payload.token, &payload.token).is_err() {
+    tracing::debug!("[TELEMETRY] Attempting to save token to OS Keyring...");
+    if let Err(e) = daemon_core::keyring::TokenStore::save(&payload.token, &payload.token) {
+        tracing::error!("[TELEMETRY] OS Keyring SAVE FAILED: {:?}", e);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to save token to keyring"));
     }
+    tracing::debug!("[TELEMETRY] OS Keyring SAVE SUCCESSFUL.");
 
     // Actualizar estado
     {
+        tracing::debug!("[TELEMETRY] Writing new pairing state to state.json...");
         let mut s = state.daemon_state.write().await;
         s.device_id = Some(payload.token.clone());
         s.backend_url = Some(payload.backend_url.clone());
-        let _ = s.save(&state.config_dir).await;
+        if let Err(e) = s.save(&state.config_dir).await {
+            tracing::error!("[TELEMETRY] state.json SAVE FAILED: {:?}", e);
+        } else {
+            tracing::debug!("[TELEMETRY] state.json SAVE SUCCESSFUL.");
+        }
     }
 
     // Iniciar el WS Client de forma asíncrona

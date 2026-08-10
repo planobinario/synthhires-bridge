@@ -221,6 +221,7 @@ async fn background_daemon_task(
             })
     });
     std::fs::create_dir_all(&config_dir).ok();
+    tracing::debug!("[TELEMETRY] Booting. Config directory mapped to: {:?}", config_dir);
 
     let local_port = cli.local_port.unwrap_or(7333);
 
@@ -278,6 +279,13 @@ async fn background_daemon_task(
     }
 
     let state = Arc::new(RwLock::new(DaemonState::load(&config_dir).await?));
+    {
+        let s = state.read().await;
+        tracing::debug!("[TELEMETRY] State loaded. is_paired: {}, target_backend_url: {:?}", s.device_id.is_some(), s.backend_url);
+        if let Some(ref did) = s.device_id {
+            tracing::debug!("[TELEMETRY] Found paired device_id in state.json (length: {})", did.len());
+        }
+    }
 
     let backend_url = cli
         .backend_url

@@ -103,19 +103,29 @@ impl WsClient {
     }
 
     async fn connect_once(&self) -> Result<()> {
-        tracing::info!("Attempting WS connection to URL: {}", self.backend_url);
-        let mut req = self.backend_url.clone().into_client_request().map_err(|e| crate::DaemonError::Ws(format!("into_client_request: {e}")))?;
+        tracing::info!("[TELEMETRY] Attempting WS TCP/TLS connection to URL: {}", self.backend_url);
+        let mut req = self.backend_url.clone().into_client_request().map_err(|e| {
+            tracing::error!("[TELEMETRY] WS URL parsing failed: {}", e);
+            crate::DaemonError::Ws(format!("into_client_request: {e}"))
+        })?;
         req.headers_mut()
-            .insert("Sec-WebSocket-Protocol", format!("bearer.{}", self.token).parse().map_err(|e: http::header::InvalidHeaderValue| crate::DaemonError::Ws(format!("invalid header: {e}")))?);
+            .insert("Sec-WebSocket-Protocol", format!("bearer.{}", self.token).parse().map_err(|e: http::header::InvalidHeaderValue| {
+                tracing::error!("[TELEMETRY] Invalid Sec-WebSocket-Protocol header value: {}", e);
+                crate::DaemonError::Ws(format!("invalid header: {e}"))
+            })?);
+            
+        tracing::debug!("[TELEMETRY] Handshake Request Headers built. Dispatching connect_async...");
         let (mut ws, _resp) = connect_async(req).await.map_err(|e| {
+            tracing::error!("[TELEMETRY] connect_async failed (TCP/DNS/TLS error): {:?}", e);
             crate::DaemonError::Ws(format!("connect: {e}"))
         })?;
-        tracing::debug!("WebSocket handshake response status: {}", _resp.status());
-        tracing::debug!("WebSocket handshake response headers: {:?}", _resp.headers());
+        tracing::info!("[TELEMETRY] TCP/TLS connected successfully. HTTP Handshake status: {}", _resp.status());
+        tracing::debug!("[TELEMETRY] HTTP Handshake response headers: {:?}", _resp.headers());
         // Send hello
+        let token_hash = hex::encode(sha2::Sha256::digest(self.token.as_bytes()));
         let hello = BridgeFrame::Hello(HelloFrame {
             v: PROTOCOL_VERSION,
-            token_hash: hex::encode(sha2::Sha256::digest(self.token.as_bytes())),
+            token_hash: token_hash.clone(),
             fingerprint: self.fingerprint.clone(),
             device_kind: match self.device_kind {
                 "desktop" => daemon_protocol::DeviceKind::Desktop,
@@ -124,29 +134,56 @@ impl WsClient {
             device_name: self.device_name.clone(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
         });
-        ws.send(Message::Text(serde_json::to_string(&hello)?))
+        let hello_str = serde_json::to_string(&hello)?;
+        tracing::debug!("[TELEMETRY] Sending Hello Frame (v: {}, token_hash: {})", PROTOCOL_VERSION, token_hash);
+        ws.send(Message::Text(hello_str))
             .await
-            .map_err(|e| crate::DaemonError::Ws(format!("send hello: {e}")))?;
+            .map_err(|e| {
+                tracing::error!("[TELEMETRY] Failed to send Hello Frame: {}", e);
+                crate::DaemonError::Ws(format!("send hello: {e}"))
+            })?;
 
         // Read hello_ack (first frame MUST be hello_ack per protocol).
+        tracing::debug!("[TELEMETRY] Waiting for HelloAck frame from server...");
         let first = ws
             .next()
             .await
-            .ok_or_else(|| crate::DaemonError::Protocol("ws closed before hello_ack".into()))?
-            .map_err(|e| crate::DaemonError::Ws(format!("recv hello_ack: {e}")))?;
+            .ok_or_else(|| {
+                tracing::error!("[TELEMETRY] Connection closed by server BEFORE sending HelloAck!");
+                crate::DaemonError::Protocol("ws closed before hello_ack".into())
+            })?
+            .map_err(|e| {
+                tracing::error!("[TELEMETRY] Network error while waiting for HelloAck: {}", e);
+                crate::DaemonError::Ws(format!("recv hello_ack: {e}"))
+            })?;
+            
+        tracing::debug!("[TELEMETRY] Received first frame. Decoding...");
         let ack: BridgeFrame = match first {
-            Message::Text(t) => serde_json::from_str(&t)?,
-            _ => return Err(crate::DaemonError::Protocol("hello_ack not text".into())),
+            Message::Text(t) => {
+                tracing::debug!("[TELEMETRY] Raw HelloAck JSON payload: {}", t);
+                serde_json::from_str(&t)?
+            },
+            _ => {
+                tracing::error!("[TELEMETRY] Server replied with non-text frame instead of HelloAck.");
+                return Err(crate::DaemonError::Protocol("hello_ack not text".into()));
+            }
         };
         let ack = match ack {
-            BridgeFrame::HelloAck(ack) => ack,
+            BridgeFrame::HelloAck(ack) => {
+                tracing::info!("[TELEMETRY] Auth SUCCESS. HelloAck parsed correctly (DeviceID: {}).", ack.device_id);
+                ack
+            },
             BridgeFrame::Error(e) => {
+                tracing::error!("[TELEMETRY] Auth REJECTED. Server returned Error Frame -> code: {}, message: {}", e.code, e.message);
                 return Err(crate::DaemonError::Protocol(format!(
                     "{}: {}",
                     e.code, e.message
                 )));
             }
-            _ => return Err(crate::DaemonError::Protocol("expected hello_ack".into())),
+            _ => {
+                tracing::error!("[TELEMETRY] Server replied with a valid JSON frame, but it was NOT HelloAck or Error.");
+                return Err(crate::DaemonError::Protocol("expected hello_ack".into()));
+            }
         };
         // Update scope cache
         let mut g = self.gate.lock().await;
