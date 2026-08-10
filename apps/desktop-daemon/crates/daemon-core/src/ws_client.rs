@@ -91,6 +91,8 @@ impl WsClient {
         let (mut ws, _resp) = connect_async(req).await.map_err(|e| {
             crate::DaemonError::Ws(format!("connect: {e}"))
         })?;
+        tracing::debug!("WebSocket handshake response status: {}", _resp.status());
+        tracing::debug!("WebSocket handshake response headers: {:?}", _resp.headers());
         // Send hello
         let hello = BridgeFrame::Hello(HelloFrame {
             v: PROTOCOL_VERSION,

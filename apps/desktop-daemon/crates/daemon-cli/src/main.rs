@@ -134,7 +134,7 @@ fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new("synthhires_bridge=debug,daemon_core=debug,daemon_protocol=debug")
+                    tracing_subscriber::EnvFilter::new("synthhires_bridge=debug,daemon_core=debug,daemon_protocol=debug,tokio_tungstenite=debug,tungstenite=debug")
                 }),
         )
         .with_writer(both)
@@ -260,13 +260,13 @@ async fn background_daemon_task(
                     use std::io::Read;
                     let _ = conn.read_exact(&mut buf);
                 } else {
-                    let _ = open::that(&web_url);
+                    tracing::error!("Failed to connect to IPC server");
                 }
             }
             return Ok(());
         }
     } else {
-        let _ = open::that(&web_url);
+        tracing::error!("Failed to acquire single instance lock");
         return Ok(());
     }
 
@@ -492,20 +492,6 @@ async fn background_daemon_task(
                 }
             } else {
                 tracing::error!("Failed to bind IPC listener");
-            }
-        }
-    });
-
-    // Auto-open web app on launch
-    tokio::spawn({
-        let url = web_url.clone();
-        let last_poll = last_poll.clone();
-        async move {
-            tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-            let last = last_poll.load(std::sync::atomic::Ordering::Relaxed);
-            if now > last + 5 {
-                let _ = open::that(&url);
             }
         }
     });

@@ -299,6 +299,10 @@ impl eframe::App for BridgeApp {
                             if ui.button("🧹 Limpiar").clicked() {
                                 self.logs.clear();
                             }
+                            if ui.button("📋 Copiar").clicked() {
+                                let all_logs = self.logs.iter().cloned().collect::<Vec<_>>().join("\n");
+                                ui.output_mut(|o| o.copied_text = all_logs);
+                            }
                         });
                     });
                     ui.add_space(8.0);
