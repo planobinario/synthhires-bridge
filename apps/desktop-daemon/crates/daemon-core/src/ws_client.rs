@@ -64,20 +64,36 @@ impl WsClient {
     pub async fn run(&self) -> Result<()> {
         let mut backoff = Duration::from_secs(1);
         loop {
+            let start = std::time::Instant::now();
             match self.connect_once().await {
                 Ok(()) => {
                     // Graceful close; treat as a normal reconnect.
                     tracing::info!("WS closed cleanly; reconnecting in {:?}", backoff);
+                    if let Some(tx) = &self.status_tx {
+                        let _ = tx.send(format!("Desconectado (reconectando en {}s...)", backoff.as_secs()));
+                    }
                 }
                 Err(crate::DaemonError::Protocol(msg))
                     if msg.contains("auth_failed") || msg.contains("revoked") =>
                 {
+                    if let Some(tx) = &self.status_tx {
+                        let _ = tx.send("Error crítico: Autenticación rechazada".to_string());
+                    }
                     return Err(crate::DaemonError::Protocol(msg));
                 }
                 Err(e) => {
                     tracing::warn!("WS error: {e}; reconnecting in {:?}", backoff);
+                    if let Some(tx) = &self.status_tx {
+                        let _ = tx.send(format!("Error de red (reconectando en {}s...)", backoff.as_secs()));
+                    }
                 }
             }
+            
+            // If connection survived for > 5 seconds, it was stable. Reset backoff.
+            if start.elapsed() > Duration::from_secs(5) {
+                backoff = Duration::from_secs(1);
+            }
+            
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
             // Add 0-1s jitter

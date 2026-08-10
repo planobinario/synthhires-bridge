@@ -76,7 +76,13 @@ pub async fn start_http_server(
 
 fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'static str)> {
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if origin != "https://app.synthhires.com" && origin != "http://localhost:4321" && origin != "http://127.0.0.1:4321" && origin != "http://localhost:8787" && origin != "http://127.0.0.1:8787" {
+    let is_valid = origin == "https://app.synthhires.com" 
+        || origin.starts_with("http://localhost:") 
+        || origin.starts_with("http://127.0.0.1:")
+        || origin == "http://localhost" // Port 80
+        || origin == "http://127.0.0.1";
+        
+    if !is_valid {
         tracing::warn!("Rejecting request from invalid origin: {}", origin);
         return Err((StatusCode::FORBIDDEN, "Invalid Origin"));
     }
