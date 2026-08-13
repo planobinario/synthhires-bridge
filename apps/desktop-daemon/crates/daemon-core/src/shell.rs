@@ -12,7 +12,7 @@
 //! shell still parses it as a single command line — but the user
 //! opted into shell semantics explicitly by selecting shell mode.
 
-use crate::{capability::CapabilityGate, Result, DaemonError};
+use crate::{capability::CapabilityGate, DaemonError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -60,7 +60,9 @@ impl<'a> ShellRunner<'a> {
         req: ShellRequest,
     ) -> Result<(mpsc::Receiver<ShellOutputChunk>, ShellResultFuture)> {
         if !self.gate.allows("desktop.shell.execute") {
-            return Err(DaemonError::CapabilityDenied("desktop.shell.execute".into()));
+            return Err(DaemonError::CapabilityDenied(
+                "desktop.shell.execute".into(),
+            ));
         }
         let timeout = req.timeout_ms.unwrap_or(30_000);
         let mut cmd = Command::new("bash");
@@ -68,19 +70,23 @@ impl<'a> ShellRunner<'a> {
         if let Some(cwd) = &req.cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
         // Kill the entire process group on timeout — important for
         // shell commands that fork (e.g. `npm test && watch ...`).
         cmd.kill_on_drop(true);
 
         let start = std::time::Instant::now();
         let mut child = cmd.spawn().map_err(DaemonError::Io)?;
-        let stdout = child.stdout.take().ok_or_else(|| DaemonError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "no stdout"),
-        ))?;
-        let stderr = child.stderr.take().ok_or_else(|| DaemonError::Io(
-            std::io::Error::new(std::io::ErrorKind::Other, "no stderr"),
-        ))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DaemonError::Io(std::io::Error::other("no stdout")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| DaemonError::Io(std::io::Error::other("no stderr")))?;
 
         let (tx, rx) = mpsc::channel::<ShellOutputChunk>(64);
 
@@ -90,7 +96,10 @@ impl<'a> ShellRunner<'a> {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if txo
-                    .send(ShellOutputChunk { channel: "stdout", data: format!("{}\n", line) })
+                    .send(ShellOutputChunk {
+                        channel: "stdout",
+                        data: format!("{}\n", line),
+                    })
                     .await
                     .is_err()
                 {
@@ -104,7 +113,10 @@ impl<'a> ShellRunner<'a> {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if txe
-                    .send(ShellOutputChunk { channel: "stderr", data: format!("{}\n", line) })
+                    .send(ShellOutputChunk {
+                        channel: "stderr",
+                        data: format!("{}\n", line),
+                    })
                     .await
                     .is_err()
                 {

@@ -4,21 +4,26 @@
 
 #[cfg(target_os = "android")]
 mod imp {
+    use crate::{CapabilityGate, DeviceFingerprint, WsClient};
     use std::ffi::{c_char, c_int, CStr};
     use tokio::runtime::Runtime;
-    use crate::{CapabilityGate, DeviceFingerprint, WsClient};
 
     #[allow(improper_ctypes)]
     extern "system" {
-        fn GetStringUTFChars(env: *mut c_void, str: *mut c_void, is_copy: *mut u8) -> *const c_char;
+        fn GetStringUTFChars(env: *mut c_void, str: *mut c_void, is_copy: *mut u8)
+            -> *const c_char;
         fn ReleaseStringUTFChars(env: *mut c_void, str: *mut c_void, utf: *const c_char);
     }
 
     fn get_string(env: *mut c_void, jstr: *mut c_void) -> String {
-        if jstr.is_null() { return String::new(); }
+        if jstr.is_null() {
+            return String::new();
+        }
         unsafe {
             let raw = GetStringUTFChars(env, jstr, std::ptr::null_mut());
-            if raw.is_null() { return String::new(); }
+            if raw.is_null() {
+                return String::new();
+            }
             let s = CStr::from_ptr(raw).to_string_lossy().into_owned();
             ReleaseStringUTFChars(env, jstr, raw);
             s
@@ -39,9 +44,22 @@ mod imp {
 
         let fingerprint = DeviceFingerprint::compute();
         let gate = CapabilityGate::new(Default::default());
+        let chat_store = std::sync::Arc::new(
+            crate::ChatStore::open(&crate::ChatStore::default_path()).unwrap_or_else(|e| {
+                tracing::error!("[chat-store] open failed, falling back to memory: {e}");
+                crate::ChatStore::open(std::path::Path::new(":memory:"))
+                    .expect("in-memory chat store")
+            }),
+        );
         let client = WsClient::new(
-            backend_url, token, device_id, fingerprint,
-            "mobile", "Android Bridge", gate,
+            backend_url,
+            token,
+            device_id,
+            fingerprint,
+            "mobile",
+            "Android Bridge",
+            gate,
+            chat_store,
         );
 
         let rt = Runtime::new().expect("tokio runtime for Android bridge");

@@ -13,7 +13,7 @@
 //! `~/.config/synthhires/audit.salt` with mode 0600. The key never
 //! leaves memory.
 
-use crate::{Result, DaemonError};
+use crate::{DaemonError, Result};
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
@@ -50,7 +50,7 @@ impl AuditLog {
         } else {
             let mut s = [0u8; 16];
             rand::rngs::OsRng.fill_bytes(&mut s);
-            std::fs::write(&salt_path, &s).map_err(DaemonError::Io)?;
+            std::fs::write(&salt_path, s.as_slice()).map_err(DaemonError::Io)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -99,7 +99,9 @@ impl AuditLog {
             .map_err(|e| DaemonError::Keyring(format!("aes init: {e}")))?;
         let mut out = Vec::new();
         for line in raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-            if line.len() < 12 { continue; }
+            if line.len() < 12 {
+                continue;
+            }
             let (nonce, ct) = line.split_at(12);
             let pt = cipher
                 .decrypt(Nonce::from_slice(nonce), ct)
@@ -124,7 +126,7 @@ fn derive_key(device_id: &str, salt: &[u8]) -> [u8; 32] {
     let mut buf = hasher.finalize();
     for _ in 0..PBKDF2_ITERATIONS {
         let mut h = Sha256::new();
-        h.update(&buf);
+        h.update(buf);
         buf = h.finalize();
     }
     buf.into()

@@ -12,8 +12,8 @@
 //! `/home/u/workspace/`.
 
 use daemon_protocol::Scopes;
-use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScopeSnapshot {
@@ -27,11 +27,7 @@ impl From<&Scopes> for ScopeSnapshot {
     fn from(s: &Scopes) -> Self {
         ScopeSnapshot {
             capabilities: s.capabilities.clone(),
-            always_allow_paths: s
-                .always_allow_paths
-                .iter()
-                .map(PathBuf::from)
-                .collect(),
+            always_allow_paths: s.always_allow_paths.iter().map(PathBuf::from).collect(),
         }
     }
 }
@@ -66,11 +62,7 @@ impl CapabilityGate {
     /// path is within an allowed scope but the user hasn't added it
     /// to alwaysAllowPaths. Returns Deny if the capability itself is
     /// not in the snapshot.
-    pub fn check_path(
-        &self,
-        capability: &str,
-        path: &Path,
-    ) -> GateDecision {
+    pub fn check_path(&self, capability: &str, path: &Path) -> GateDecision {
         if !self.allows(capability) {
             return GateDecision::Deny;
         }
@@ -131,7 +123,10 @@ mod tests {
     fn allows_under_prefix() {
         let g = gate_with_paths(&["/home/u/workspace"]);
         assert_eq!(
-            g.check_path("desktop.fs.read", Path::new("/home/u/workspace/sub/file.txt")),
+            g.check_path(
+                "desktop.fs.read",
+                Path::new("/home/u/workspace/sub/file.txt")
+            ),
             GateDecision::Allow
         );
     }
@@ -152,7 +147,10 @@ mod tests {
     fn denies_path_traversal() {
         let g = gate_with_paths(&["/home/u/workspace"]);
         assert_eq!(
-            g.check_path("desktop.fs.read", Path::new("/home/u/workspace/../etc/passwd")),
+            g.check_path(
+                "desktop.fs.read",
+                Path::new("/home/u/workspace/../etc/passwd")
+            ),
             GateDecision::RequireConsent
         );
     }

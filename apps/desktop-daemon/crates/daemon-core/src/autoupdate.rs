@@ -31,8 +31,7 @@ fn update_pubkey_hex() -> &'static str {
         .unwrap_or("cddb85d58da4192d7d59f2e086bb6d84cbf6581c0b654845620f21c64eaa2e0c")
 }
 
-const RELEASES_API: &str =
-    "https://api.github.com/repos/planobinario/synth-hires/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/planobinario/synth-hires/releases";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -79,9 +78,7 @@ fn verify_manifest_signature(raw_json: &[u8]) -> bool {
         }
     };
 
-    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(
-        &pubkey_bytes.try_into().unwrap(),
-    );
+    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes.try_into().unwrap());
     let Ok(pubkey) = pubkey else {
         tracing::error!("embedded Ed25519 public key is invalid");
         return false;
@@ -152,9 +149,7 @@ pub async fn check_for_update(current_version: &str) -> UpdateStatus {
     };
 
     let tag_name = release["tag_name"].as_str().unwrap_or("unknown");
-    let latest_version = tag_name
-        .strip_prefix("daemon-v")
-        .unwrap_or(tag_name);
+    let latest_version = tag_name.strip_prefix("daemon-v").unwrap_or(tag_name);
 
     if current_version >= latest_version {
         return UpdateStatus::UpToDate;
@@ -186,16 +181,13 @@ pub async fn check_for_update(current_version: &str) -> UpdateStatus {
     };
 
     let target_triple = current_target();
-    let artifact = manifest
-        .artifacts
-        .into_iter()
-        .find_map(|(name, entry)| {
-            if entry.target == target_triple {
-                Some((name, entry))
-            } else {
-                None
-            }
-        });
+    let artifact = manifest.artifacts.into_iter().find_map(|(name, entry)| {
+        if entry.target == target_triple {
+            Some((name, entry))
+        } else {
+            None
+        }
+    });
 
     match artifact {
         Some((_name, entry)) => UpdateStatus::UpdateAvailable {
@@ -218,17 +210,17 @@ pub async fn download_and_verify(
         .timeout(DOWNLOAD_TIMEOUT)
         .user_agent(concat!("synthhires-bridge/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
 
     let bytes = client
         .get(&entry.url)
         .send()
         .await
         .and_then(|r| r.error_for_status())
-        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?
         .bytes()
         .await
-        .map_err(|e| DaemonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e)))?;
 
     let expected = hex::decode(&entry.sha256)
         .map_err(|e| DaemonError::Protocol(format!("invalid sha256 in manifest: {e}")))?;
@@ -239,8 +231,7 @@ pub async fn download_and_verify(
         ));
     }
 
-    std::fs::write(dest_path.as_ref(), &bytes)
-        .map_err(DaemonError::Io)?;
+    std::fs::write(dest_path.as_ref(), &bytes).map_err(DaemonError::Io)?;
 
     tracing::info!(
         "update binary verified and saved to {}",
@@ -268,7 +259,7 @@ fn current_target() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
     fn test_current_target_known() {

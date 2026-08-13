@@ -62,12 +62,15 @@ impl<'a> FsOps<'a> {
 
     pub async fn write(&self, req: FsWriteRequest) -> Result<()> {
         self.gate_for_path("desktop.fs.write", &req.path)?;
-        let parent = req.path.parent().ok_or_else(|| {
-            DaemonError::PathDenied(format!("{}: no parent", req.path.display()))
-        })?;
+        let parent = req
+            .path
+            .parent()
+            .ok_or_else(|| DaemonError::PathDenied(format!("{}: no parent", req.path.display())))?;
         fs::create_dir_all(parent).await.map_err(DaemonError::Io)?;
         let tmp = req.path.with_extension("synthhires-tmp");
-        fs::write(&tmp, req.content.as_bytes()).await.map_err(DaemonError::Io)?;
+        fs::write(&tmp, req.content.as_bytes())
+            .await
+            .map_err(DaemonError::Io)?;
         fs::rename(&tmp, &req.path).await.map_err(DaemonError::Io)?;
         Ok(())
     }
@@ -76,7 +79,9 @@ impl<'a> FsOps<'a> {
         self.gate_for_path("desktop.fs.delete", &req.path)?;
         let meta = fs::metadata(&req.path).await.map_err(DaemonError::Io)?;
         if meta.is_dir() {
-            fs::remove_dir_all(&req.path).await.map_err(DaemonError::Io)?;
+            fs::remove_dir_all(&req.path)
+                .await
+                .map_err(DaemonError::Io)?;
         } else {
             fs::remove_file(&req.path).await.map_err(DaemonError::Io)?;
         }
@@ -98,8 +103,7 @@ impl<'a> FsOps<'a> {
 
 /// Minimal base64 encoder so we don't pull in the `base64` crate.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {

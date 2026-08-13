@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{Method, StatusCode, header},
+    http::{header, Method, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -20,6 +20,7 @@ pub struct ServerState {
     pub status_tx: tokio::sync::watch::Sender<String>,
     pub last_poll: Arc<std::sync::atomic::AtomicU64>,
     pub ws_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    pub chat_store: std::sync::Arc<daemon_core::ChatStore>,
 }
 
 #[derive(Serialize)]
@@ -52,31 +53,26 @@ pub async fn start_http_server(
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
             let o = origin.as_bytes();
-            o == b"https://app.synthhires.com" 
-                || o.starts_with(b"http://localhost:") 
-                || o.starts_with(b"http://127.0.0.1:")
-                || o == b"http://localhost"
-                || o == b"http://127.0.0.1"
+            o == b"https://app.synthhires.com"
+                || o == b"http://localhost:4321"
+                || o == b"http://127.0.0.1:4321"
+                || o == b"http://localhost:8787"
+                || o == b"http://127.0.0.1:8787"
         }))
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE])
         // Cabecera esencial para PNA en navegadores basados en Chromium
         .allow_private_network(true);
 
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    tracing::info!("Starting secure local HTTP server on {}", addr);
-    
-    let is_paired = state.daemon_state.read().await.device_id.is_some();
-    if !is_paired {
-        tracing::info!("Daemon is waiting for pairing. Please open the web app Dashboard or click 'Vincular' in the UI.");
-    }
-
     let app = Router::new()
         .route("/status", get(handle_status))
         .route("/pair", post(handle_pair))
         .layer(cors)
         .with_state(state);
-    
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    tracing::info!("Starting secure local HTTP server on {}", addr);
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
@@ -84,18 +80,19 @@ pub async fn start_http_server(
 }
 
 fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'static str)> {
-    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let is_valid = origin == "https://app.synthhires.com" 
-        || origin.starts_with("http://localhost:") 
-        || origin.starts_with("http://127.0.0.1:")
-        || origin == "http://localhost" // Port 80
-        || origin == "http://127.0.0.1";
-        
-    if !is_valid {
-        tracing::warn!("[TELEMETRY] CORS REJECTED: HTTP request from origin '{}' is not in the whitelist.", origin);
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if origin != "https://app.synthhires.com"
+        && origin != "http://localhost:4321"
+        && origin != "http://127.0.0.1:4321"
+        && origin != "http://localhost:8787"
+        && origin != "http://127.0.0.1:8787"
+    {
+        tracing::warn!("Rejecting request from invalid origin: {}", origin);
         return Err((StatusCode::FORBIDDEN, "Invalid Origin"));
     }
-    tracing::debug!("[TELEMETRY] CORS ALLOWED: Origin '{}'", origin);
     Ok(())
 }
 
@@ -104,15 +101,17 @@ async fn handle_status(
     State(state): State<ServerState>,
 ) -> Result<Json<StatusResponse>, (StatusCode, &'static str)> {
     check_origin(&headers)?;
-    tracing::debug!("[TELEMETRY] Incoming /status request. Updating last_poll.");
     // Registrar el poll del frontend para saber que la UI está abierta
     state.last_poll.store(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-        std::sync::atomic::Ordering::Relaxed
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        std::sync::atomic::Ordering::Relaxed,
     );
 
     let is_paired = state.daemon_state.read().await.device_id.is_some();
-    
+
     // Si ya está emparejado, no exponemos nonce.
     // Si no está emparejado, comprobamos el TTL del nonce. Si expira o no hay, creamos uno nuevo.
     let nonce = if !is_paired {
@@ -154,7 +153,9 @@ async fn handle_pair(
         let mut n = state.pairing_nonce.write().await;
         let valid = match &*n {
             Some((val, created_at)) => {
-                val == &payload.nonce && std::time::Instant::now().duration_since(*created_at) <= std::time::Duration::from_secs(120)
+                val == &payload.nonce
+                    && std::time::Instant::now().duration_since(*created_at)
+                        <= std::time::Duration::from_secs(120)
             }
             None => false,
         };
@@ -166,41 +167,35 @@ async fn handle_pair(
         *n = None;
     }
 
-    tracing::info!("[TELEMETRY] Valid pairing request received via local HTTP. Token handoff starting...");
-    tracing::debug!("[TELEMETRY] /pair Payload -> backend_url: {}, nonce: {}", payload.backend_url, payload.nonce);
+    tracing::info!("Valid pairing request received via local HTTP. Token handoff starting...");
 
     // Guardar token en el llavero local (Keyring)
-    tracing::debug!("[TELEMETRY] Attempting to save token to OS Keyring...");
-    if let Err(e) = daemon_core::keyring::TokenStore::save(&payload.token, &payload.token) {
-        tracing::error!("[TELEMETRY] OS Keyring SAVE FAILED: {:?}", e);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to save token to keyring"));
+    if daemon_core::keyring::TokenStore::save(&payload.token, &payload.token).is_err() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to save token to keyring",
+        ));
     }
-    tracing::debug!("[TELEMETRY] OS Keyring SAVE SUCCESSFUL.");
 
     // Actualizar estado
     {
-        tracing::debug!("[TELEMETRY] Writing new pairing state to state.json...");
         let mut s = state.daemon_state.write().await;
         s.device_id = Some(payload.token.clone());
         s.backend_url = Some(payload.backend_url.clone());
-        if let Err(e) = s.save(&state.config_dir).await {
-            tracing::error!("[TELEMETRY] state.json SAVE FAILED: {:?}", e);
-        } else {
-            tracing::debug!("[TELEMETRY] state.json SAVE SUCCESSFUL.");
-        }
+        let _ = s.save(&state.config_dir).await;
     }
 
     // Iniciar el WS Client de forma asíncrona
     let ws_state = state.daemon_state.clone();
     let status_tx = state.status_tx.clone();
+    let ws_store = state.chat_store.clone();
     let mut hw = state.ws_handle.lock().await;
     if let Some(h) = hw.take() {
         h.abort();
     }
     *hw = Some(tokio::spawn(async move {
         let _ = status_tx.send("Conectando al servidor...".to_string());
-        let tx_for_ws = status_tx.clone();
-        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, tx_for_ws).await {
+        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store).await {
             tracing::error!("WS client died: {e}");
             let _ = status_tx.send(format!("Error de conexión: {e}"));
         }

@@ -25,8 +25,11 @@ pub fn build_tray(
 
     let menu = Menu::new();
 
-    let status: &'static MenuItem =
-        Box::leak(Box::new(MenuItem::new("🟢 SynthHires Bridge Daemon — Activo", false, None)));
+    let status: &'static MenuItem = Box::leak(Box::new(MenuItem::new(
+        "🟢 SynthHires Bridge Daemon — Activo",
+        false,
+        None,
+    )));
     menu.append(status).ok();
 
     let sep: &'static PredefinedMenuItem = Box::leak(Box::new(PredefinedMenuItem::separator()));
@@ -37,8 +40,11 @@ pub fn build_tray(
     let show_window_id = show_window_item.id();
     menu.append(show_window_item).ok();
 
-    let disconnect_item: &'static MenuItem =
-        Box::leak(Box::new(MenuItem::new("🔌 Desvincular Dispositivo", true, None)));
+    let disconnect_item: &'static MenuItem = Box::leak(Box::new(MenuItem::new(
+        "🔌 Desvincular Dispositivo",
+        true,
+        None,
+    )));
     let disconnect_id = disconnect_item.id();
     menu.append(disconnect_item).ok();
 
@@ -55,19 +61,10 @@ pub fn build_tray(
         .with_icon(icon)
         .with_tooltip("SynthHires Bridge — 🟢 Activo (127.0.0.1)")
         .build()
-        .map_err(|e| {
-            daemon_core::DaemonError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("tray: {e}"),
-            ))
-        })?;
+        .map_err(|e| daemon_core::DaemonError::Io(std::io::Error::other(format!("tray: {e}"))))?;
 
     std::thread::spawn(move || {
-        loop {
-            let Ok(event) = MenuEvent::receiver().recv() else {
-                break;
-            };
-
+        while let Ok(event) = MenuEvent::receiver().recv() {
             if event.id == quit_id {
                 let _ = quit_tx.send(());
                 std::process::exit(0);
@@ -82,7 +79,9 @@ pub fn build_tray(
                             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
                             // Also ensure it's not minimized
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(eframe::egui::vec2(700.0, 500.0)));
+                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+                                eframe::egui::vec2(700.0, 500.0),
+                            ));
                             tracing::info!("Visible and Focus commands sent to UI");
                         }
                     });
@@ -120,67 +119,5 @@ fn load_icon() -> Icon {
         .expect("failed to decode embedded tray icon")
         .into_rgba8();
     let (w, h) = img.dimensions();
-    Icon::from_rgba(img.into_raw(), w, h)
-        .expect("failed to create tray icon from RGBA")
-}
-
-fn fallback_icon() -> Icon {
-    let w = 32u32;
-    let h = 32u32;
-    let mut pixels = vec![0u8; (w * h * 4) as usize];
-
-    for y in 0..h {
-        for x in 0..w {
-            let idx = ((y * w + x) * 4) as usize;
-            pixels[idx] = 248;
-            pixels[idx + 1] = 248;
-            pixels[idx + 2] = 252;
-            pixels[idx + 3] = 255;
-        }
-    }
-
-    let cx = (w / 2) as i32;
-    let cy = (h / 2) as i32;
-
-    draw_line(&mut pixels, w, h, cx - 6, cy - 5, cx - 1, cy, 100, 116, 139, 3);
-    draw_line(&mut pixels, w, h, cx - 1, cy, cx - 6, cy + 5, 100, 116, 139, 3);
-    draw_line(&mut pixels, w, h, cx, cy - 5, cx + 5, cy, 99, 102, 241, 3);
-    draw_line(&mut pixels, w, h, cx + 5, cy, cx, cy + 5, 99, 102, 241, 3);
-
-    Icon::from_rgba(pixels, w, h).expect("failed to create fallback tray icon")
-}
-
-fn draw_line(
-    pixels: &mut [u8], w: u32, h: u32,
-    x1: i32, y1: i32, x2: i32, y2: i32,
-    r: u8, g: u8, b: u8, thickness: i32,
-) {
-    let dx = (x2 - x1).abs();
-    let dy = -(y2 - y1).abs();
-    let sx = if x1 < x2 { 1 } else { -1 };
-    let sy = if y1 < y2 { 1 } else { -1 };
-    let mut err = dx + dy;
-    let mut x = x1;
-    let mut y = y1;
-
-    loop {
-        for tx in -thickness..=thickness {
-            for ty in -thickness..=thickness {
-                if tx * tx + ty * ty > thickness * thickness { continue; }
-                let px = x + tx;
-                let py = y + ty;
-                if px >= 0 && py >= 0 && px < w as i32 && py < h as i32 {
-                    let idx = ((py as u32 * w + px as u32) * 4) as usize;
-                    pixels[idx] = r;
-                    pixels[idx + 1] = g;
-                    pixels[idx + 2] = b;
-                    pixels[idx + 3] = 255;
-                }
-            }
-        }
-        if x == x2 && y == y2 { break; }
-        let e2 = 2 * err;
-        if e2 >= dy { if x == x2 { break; } err += dy; x += sx; }
-        if e2 <= dx { if y == y2 { break; } err += dx; y += sy; }
-    }
+    Icon::from_rgba(img.into_raw(), w, h).expect("failed to create tray icon from RGBA")
 }

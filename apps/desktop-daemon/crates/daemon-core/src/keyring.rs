@@ -11,7 +11,7 @@
 //! `BRIDGE` service name and a per-device account so multiple
 //! devices on the same machine coexist without collision.
 
-use crate::{Result, DaemonError};
+use crate::{DaemonError, Result};
 use keyring::Entry;
 
 const SERVICE: &str = "com.synthhires.bridge.desktop";
@@ -20,8 +20,8 @@ pub struct TokenStore;
 
 impl TokenStore {
     pub fn save(device_id: &str, token: &str) -> Result<()> {
-        let entry = Entry::new(SERVICE, device_id)
-            .map_err(|e| DaemonError::Keyring(e.to_string()))?;
+        let entry =
+            Entry::new(SERVICE, device_id).map_err(|e| DaemonError::Keyring(e.to_string()))?;
         entry
             .set_password(token)
             .map_err(|e| DaemonError::Keyring(e.to_string()))?;
@@ -29,8 +29,8 @@ impl TokenStore {
     }
 
     pub fn load(device_id: &str) -> Result<Option<String>> {
-        let entry = Entry::new(SERVICE, device_id)
-            .map_err(|e| DaemonError::Keyring(e.to_string()))?;
+        let entry =
+            Entry::new(SERVICE, device_id).map_err(|e| DaemonError::Keyring(e.to_string()))?;
         match entry.get_password() {
             Ok(t) => Ok(Some(t)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -39,8 +39,8 @@ impl TokenStore {
     }
 
     pub fn delete(device_id: &str) -> Result<()> {
-        let entry = Entry::new(SERVICE, device_id)
-            .map_err(|e| DaemonError::Keyring(e.to_string()))?;
+        let entry =
+            Entry::new(SERVICE, device_id).map_err(|e| DaemonError::Keyring(e.to_string()))?;
         match entry.delete_password() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),

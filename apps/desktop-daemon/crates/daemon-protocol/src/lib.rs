@@ -193,6 +193,64 @@ pub mod close_codes {
 /// decodable by the Rust daemon without a translation step.
 pub const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+// ── Chat sync payloads (sync.chat.push) ─────────────────────────────
+//
+// The server pushes conversation snapshots to paired devices as
+// regular `action_request` frames with capability `sync.chat.push`.
+// The daemon persists them to its local SQLite store and ACKs with
+// an `action_result`. Payload shapes mirror the web app's
+// `saveAndSyncChat` objects (id, title, model, provider, messages,
+// updatedAt) so no extra transformation lives on either side.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSyncMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    #[serde(default)]
+    pub created_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSyncConversation {
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub workspace_ref: Option<serde_json::Value>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub is_pinned: Option<bool>,
+    #[serde(default)]
+    pub updated_at: Option<u64>,
+    #[serde(default)]
+    pub messages: Vec<ChatSyncMessage>,
+}
+
+/// Parse helper: extract `sync.chat.push` params from an opaque
+/// `serde_json::Value` params bag on an ActionRequestFrame.
+pub fn parse_chat_push_params(
+    params: &serde_json::Value,
+) -> Result<Vec<ChatSyncConversation>, String> {
+    let convs = params
+        .get("conversations")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "sync.chat.push params.conversations must be an array".to_string())?;
+    let mut out = Vec::with_capacity(convs.len());
+    for c in convs {
+        match serde_json::from_value::<ChatSyncConversation>(c.clone()) {
+            Ok(conv) => out.push(conv),
+            Err(e) => return Err(format!("invalid conversation entry: {e}")),
+        }
+    }
+    Ok(out)
+}
+
 /// Generate a 6-char pairing code (30 bits of entropy). MUST match
 /// the algorithm in `src/lib/agent/bridge-codes.ts → toBase32`.
 pub fn generate_pairing_code() -> String {

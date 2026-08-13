@@ -17,26 +17,28 @@
 //!                     keeps an authoritative copy; this is for the
 //!                     user to inspect offline and for forenscis.
 
-pub mod capability;
-pub mod shell;
-pub mod fs_ops;
-pub mod keyring;
-pub mod fingerprint;
 pub mod audit;
 pub mod autoupdate;
-pub mod pairing;
-pub mod ws_client;
-pub mod task_registry;
+pub mod capability;
+pub mod chat_store;
+pub mod fingerprint;
+pub mod fs_ops;
 pub mod jni_android;
+pub mod keyring;
+pub mod pairing;
+pub mod shell;
+pub mod task_registry;
+pub mod ws_client;
 
-pub use capability::{CapabilityGate, GateDecision};
-pub use shell::ShellRunner;
-pub use fs_ops::FsOps;
-pub use keyring::TokenStore;
-pub use fingerprint::DeviceFingerprint;
 pub use audit::AuditLog;
 pub use autoupdate::{check_for_update, download_and_verify, SignedManifest, UpdateStatus};
+pub use capability::{CapabilityGate, GateDecision};
+pub use chat_store::ChatStore;
+pub use fingerprint::DeviceFingerprint;
+pub use fs_ops::FsOps;
+pub use keyring::TokenStore;
 pub use pairing::PairingFlow;
+pub use shell::ShellRunner;
 pub use ws_client::WsClient;
 
 #[derive(Debug, thiserror::Error)]

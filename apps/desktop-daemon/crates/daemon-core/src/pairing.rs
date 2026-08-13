@@ -38,15 +38,15 @@ pub struct PairingFlow<'a> {
 
 impl<'a> PairingFlow<'a> {
     pub fn new(backend_url: &'a str, client: &'a reqwest::Client) -> Self {
-        Self { backend_url, client }
+        Self {
+            backend_url,
+            client,
+        }
     }
 
     /// POST to /api/devices/pair/complete. Returns the response or an
     /// error that the daemon CLI surfaces to the user.
-    pub async fn complete(
-        &self,
-        req: PairCompleteRequest,
-    ) -> Result<PairCompleteResponse> {
+    pub async fn complete(&self, req: PairCompleteRequest) -> Result<PairCompleteResponse> {
         let url = format!("{}/api/devices/pair/complete", self.backend_url);
         let resp = self
             .client

@@ -33,7 +33,7 @@ pub struct TaskState {
 }
 
 pub enum TaskHandle {
-    ChildProcess(Child),
+    ChildProcess(Box<Child>),
     CancellableFuture(CancellationToken),
 }
 
