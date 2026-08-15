@@ -31,7 +31,13 @@ pub enum BridgeFrame {
     Error(ErrorFrame),
 }
 
+// The TS wire format (src/lib/agent/bridge-protocol.ts) is camelCase
+// for EVERY field on every frame. Without this attribute the daemon
+// fails to deserialize real frames from the web app (e.g.
+// `conversationId` vs `conversation_id`) and silently drops them.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HelloFrame {
     pub v: u32,
     pub token_hash: String,
@@ -42,6 +48,7 @@ pub struct HelloFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HelloAckFrame {
     pub v: u32,
     pub device_id: String,
@@ -57,6 +64,7 @@ pub enum DeviceKind {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Scopes {
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -65,29 +73,34 @@ pub struct Scopes {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HeartbeatFrame {
     pub v: u32,
     pub t: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HeartbeatAckFrame {
     pub v: u32,
     pub t: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionRequestFrame {
     pub v: u32,
     pub id: String,
     pub capability: String,
     pub params: serde_json::Value,
+    #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub skip_consent_prompt: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionCancelFrame {
     pub v: u32,
     pub id: String,
@@ -95,6 +108,7 @@ pub struct ActionCancelFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionResultFrame {
     pub v: u32,
     pub id: String,
@@ -107,12 +121,14 @@ pub struct ActionResultFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionError {
     pub code: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionStreamFrame {
     pub v: u32,
     pub id: String,
@@ -132,6 +148,7 @@ pub enum StreamChannel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConsentPromptFrame {
     pub v: u32,
     pub id: String,
@@ -141,6 +158,7 @@ pub struct ConsentPromptFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConsentResponseFrame {
     pub v: u32,
     pub id: String,
@@ -149,6 +167,7 @@ pub struct ConsentResponseFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScopeUpdateFrame {
     pub v: u32,
     pub scopes: Scopes,
@@ -157,18 +176,21 @@ pub struct ScopeUpdateFrame {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResumeFrame {
     pub v: u32,
     pub device_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RevokeFrame {
     pub v: u32,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ErrorFrame {
     pub v: u32,
     pub code: String,

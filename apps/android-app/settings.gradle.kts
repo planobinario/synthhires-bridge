@@ -5,11 +5,14 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-dependencyResolution {
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
         mavenCentral()
     }
 }
-rootProject.name = "SynthHiresBridge"
-include(":app")
+
+rootProject.name = "synthhires-bridge"
+include(":app", ":bridge-core")

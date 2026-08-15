@@ -31,6 +31,12 @@ pub struct FsWriteRequest {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FsWriteResult {
+    pub bytes_written: u64,
+    pub verified: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct FsDeleteRequest {
     pub path: PathBuf,
@@ -60,7 +66,7 @@ impl<'a> FsOps<'a> {
         })
     }
 
-    pub async fn write(&self, req: FsWriteRequest) -> Result<()> {
+    pub async fn write(&self, req: FsWriteRequest) -> Result<FsWriteResult> {
         self.gate_for_path("desktop.fs.write", &req.path)?;
         let parent = req
             .path
@@ -72,7 +78,15 @@ impl<'a> FsOps<'a> {
             .await
             .map_err(DaemonError::Io)?;
         fs::rename(&tmp, &req.path).await.map_err(DaemonError::Io)?;
-        Ok(())
+        // Empirical verification: read back what we just wrote. Only a
+        // byte-identical file is reported as verified. This is the same
+        // honesty guarantee as the web-side local tools.
+        let written = fs::read(&req.path).await.map_err(DaemonError::Io)?;
+        let verified = written == req.content.as_bytes();
+        Ok(FsWriteResult {
+            bytes_written: written.len() as u64,
+            verified,
+        })
     }
 
     pub async fn delete(&self, req: FsDeleteRequest) -> Result<()> {

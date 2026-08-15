@@ -14,7 +14,7 @@
 use crate::{
     capability::{CapabilityGate, ScopeSnapshot},
     chat_store::ChatStore,
-    Result,
+    DaemonError, Result,
 };
 use daemon_protocol::{parse_chat_push_params, BridgeFrame, HelloFrame, PROTOCOL_VERSION};
 use futures_util::{SinkExt, StreamExt};
@@ -318,6 +318,11 @@ impl WsClient {
                 }
             }
 
+            // Consent: skip only when the server explicitly trusts the
+            // action (alwaysAllowPaths configured in the web device
+            // panel). Everything else is rejected with an explicit,
+            // actionable error — the daemon never silently executes
+            // arbitrary shell commands on the user's machine.
             if !req.skip_consent_prompt {
                 let result = daemon_protocol::ActionResultFrame {
                     v: PROTOCOL_VERSION,
@@ -326,7 +331,7 @@ impl WsClient {
                     output: None,
                     error: Some(daemon_protocol::ActionError {
                         code: "consent_required".into(),
-                        message: "Esta acción requiere confirmación en la UI del daemon.".into(),
+                        message: "Esta acción requiere consentimiento: añade la carpeta de trabajo a 'Rutas permitidas' en el panel del dispositivo (synthhires.com/space) o aprueba la acción manualmente.".into(),
                     }),
                     duration_ms: 0,
                 };
@@ -338,16 +343,312 @@ impl WsClient {
             }
         }
 
-        // Capability-specific execution is delegated to the daemon-
-        // core modules by the upper layer (the Tauri UI). In the
-        // CLI scaffold we just acknowledge.
+        // 4. REAL execution. The previous scaffold ACKed with ok:true
+        //    without doing anything — the web agent reported success
+        //    while the user's file was never touched. That lie is the
+        //    entire bug this module now refuses to reproduce.
+        let started = std::time::Instant::now();
+        match req.capability.as_str() {
+            "desktop.fs.read" => {
+                let parse: Result<crate::fs_ops::FsReadRequest> =
+                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
+                match parse {
+                    Ok(fs_req) => {
+                        let g = self.gate.lock().await;
+                        let ops = crate::fs_ops::FsOps::new(&g);
+                        match ops.read(fs_req).await {
+                            Ok(res) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    true,
+                                    Some(serde_json::json!({
+                                        "content_base64": res.content_base64,
+                                        "size": res.size,
+                                    })),
+                                    None,
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                            Err(e) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some(e.to_string()),
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            false,
+                            None,
+                            Some(format!("bad params: {e}")),
+                            0,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "desktop.fs.write" => {
+                let parse: Result<crate::fs_ops::FsWriteRequest> =
+                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
+                match parse {
+                    Ok(fs_req) => {
+                        let g = self.gate.lock().await;
+                        let ops = crate::fs_ops::FsOps::new(&g);
+                        match ops.write(fs_req).await {
+                            Ok(res) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    res.verified,
+                                    Some(serde_json::json!({
+                                        "bytes_written": res.bytes_written,
+                                        "verified": res.verified,
+                                    })),
+                                    if res.verified {
+                                        None
+                                    } else {
+                                        Some("write completed but read-back verification FAILED — file content mismatch".into())
+                                    },
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                            Err(e) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some(e.to_string()),
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            false,
+                            None,
+                            Some(format!("bad params: {e}")),
+                            0,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "desktop.fs.delete" => {
+                let parse: Result<crate::fs_ops::FsDeleteRequest> =
+                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
+                match parse {
+                    Ok(fs_req) => {
+                        let g = self.gate.lock().await;
+                        let ops = crate::fs_ops::FsOps::new(&g);
+                        match ops.delete(fs_req).await {
+                            Ok(()) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    true,
+                                    Some(serde_json::json!({ "deleted": true })),
+                                    None,
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                            Err(e) => {
+                                drop(g);
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some(e.to_string()),
+                                    started.elapsed().as_millis() as u64,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            false,
+                            None,
+                            Some(format!("bad params: {e}")),
+                            0,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "desktop.shell.execute" => {
+                let parse: Result<crate::shell::ShellRequest> =
+                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
+                match parse {
+                    Ok(shell_req) => {
+                        // Isolated scope: the runner borrows the gate guard;
+                        // both must be dropped before the streaming loop.
+                        let run_result = {
+                            let g = self.gate.lock().await;
+                            let runner = crate::shell::ShellRunner::new(&g);
+                            runner.run(shell_req).await
+                        };
+                        match run_result {
+                            Ok((mut rx, future)) => {
+                                // The future owns the channel's last `tx`
+                                // (dropped inside await_result). Run it
+                                // concurrently so the drain loop below can
+                                // terminate — awaiting it after the loop
+                                // would deadlock (recv() never returns None
+                                // while the future holds a sender).
+                                let handle =
+                                    tokio::spawn(async move { future.await_result().await });
+                                let mut seq = 0u64;
+                                let action_id_stream = req.id.clone();
+                                while let Some(chunk) = rx.recv().await {
+                                    let frame = daemon_protocol::ActionStreamFrame {
+                                        v: PROTOCOL_VERSION,
+                                        id: action_id_stream.clone(),
+                                        seq,
+                                        channel: match chunk.channel {
+                                            "stdout" => daemon_protocol::StreamChannel::Stdout,
+                                            _ => daemon_protocol::StreamChannel::Stderr,
+                                        },
+                                        data: chunk.data,
+                                        eof: false,
+                                    };
+                                    ws.send(Message::Text(serde_json::to_string(
+                                        &BridgeFrame::ActionStream(frame),
+                                    )?))
+                                    .await?;
+                                    seq += 1;
+                                }
+                                match handle.await {
+                                    Ok(Ok(res)) => {
+                                        let ok = res.exit_code == Some(0);
+                                        self.send_action_result(
+                                            ws,
+                                            req.id,
+                                            ok,
+                                            Some(serde_json::json!({
+                                                "exit_code": res.exit_code,
+                                                "stdout": res.stdout,
+                                                "stderr": res.stderr,
+                                            })),
+                                            if ok {
+                                                None
+                                            } else {
+                                                Some(format!("exit code {:?}", res.exit_code))
+                                            },
+                                            res.duration_ms,
+                                        )
+                                        .await?;
+                                    }
+                                    Ok(Err(e)) => {
+                                        self.send_action_result(
+                                            ws,
+                                            req.id,
+                                            false,
+                                            None,
+                                            Some(e.to_string()),
+                                            started.elapsed().as_millis() as u64,
+                                        )
+                                        .await?;
+                                    }
+                                    Err(e) => {
+                                        self.send_action_result(
+                                            ws,
+                                            req.id,
+                                            false,
+                                            None,
+                                            Some(format!("shell task failed: {e}")),
+                                            started.elapsed().as_millis() as u64,
+                                        )
+                                        .await?;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some(e.to_string()),
+                                    0,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            false,
+                            None,
+                            Some(format!("bad params: {e}")),
+                            0,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            other => {
+                self.send_action_result(
+                    ws,
+                    req.id,
+                    false,
+                    None,
+                    Some(format!("Capability not implemented in daemon: {other}")),
+                    0,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_action_result(
+        &self,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        action_id: String,
+        ok: bool,
+        output: Option<serde_json::Value>,
+        error: Option<String>,
+        duration_ms: u64,
+    ) -> Result<()> {
         let result = daemon_protocol::ActionResultFrame {
             v: PROTOCOL_VERSION,
-            id: req.id,
-            ok: true,
-            output: Some(serde_json::json!({"note": "dispatched; handler lives in the Tauri UI"})),
-            error: None,
-            duration_ms: 0,
+            id: action_id,
+            ok,
+            output,
+            error: error.map(|e| daemon_protocol::ActionError {
+                code: "action_failed".into(),
+                message: e,
+            }),
+            duration_ms,
         };
         ws.send(Message::Text(serde_json::to_string(
             &BridgeFrame::ActionResult(result),
