@@ -572,6 +572,48 @@ impl WsClient {
                     }
                 }
             }
+            "desktop.fs.verify" => {
+                // Verification is how the web UI decides whether to attach
+                // a workspace — the path is NOT yet in alwaysAllowPaths, so
+                // it must NOT go through gate_for_path (that would always
+                // reject). The capability grant alone is the gate here; the
+                // probe touches nothing but a unique temp file.
+                let parse: Result<crate::fs_ops::FsVerifyRequest> =
+                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
+                match parse {
+                    Ok(fs_req) => {
+                        let g = self.gate.lock().await;
+                        let ops = crate::fs_ops::FsOps::new(&g);
+                        let res = ops.verify(fs_req).await;
+                        drop(g);
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            res.exists && res.readable && res.writable,
+                            Some(serde_json::json!({
+                                "exists": res.exists,
+                                "is_dir": res.is_dir,
+                                "readable": res.readable,
+                                "writable": res.writable,
+                            })),
+                            res.error,
+                            started.elapsed().as_millis() as u64,
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        self.send_action_result(
+                            ws,
+                            req.id,
+                            false,
+                            None,
+                            Some(format!("bad params: {e}")),
+                            0,
+                        )
+                        .await?;
+                    }
+                }
+            }
             "desktop.fs.delete" => {
                 let parse: Result<crate::fs_ops::FsDeleteRequest> =
                     serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);

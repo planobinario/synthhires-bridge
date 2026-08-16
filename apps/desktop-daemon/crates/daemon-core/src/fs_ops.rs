@@ -42,6 +42,20 @@ pub struct FsDeleteRequest {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct FsVerifyRequest {
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FsVerifyResult {
+    pub exists: bool,
+    pub is_dir: bool,
+    pub readable: bool,
+    pub writable: bool,
+    pub error: Option<String>,
+}
+
 pub struct FsOps<'a> {
     gate: &'a CapabilityGate,
 }
@@ -100,6 +114,77 @@ impl<'a> FsOps<'a> {
             fs::remove_file(&req.path).await.map_err(DaemonError::Io)?;
         }
         Ok(())
+    }
+
+    /// Empirical access verification: the agent asks "can you really
+    /// work in this folder?" and the daemon proves it on disk. Returns
+    /// a full per-axis report instead of guessing:
+    ///   • exists   — the path resolves on this machine
+    ///   • is_dir   — it is a directory (the expected shape)
+    ///   • readable — a directory listing works
+    ///   • writable — a probe file was created AND read back AND
+    ///                removed; the probe never touches user files.
+    /// Failure never throws — every axis degrades to a field so the
+    /// web UI can explain exactly what's wrong.
+    pub async fn verify(&self, req: FsVerifyRequest) -> FsVerifyResult {
+        match fs::metadata(&req.path).await {
+            Err(e) => FsVerifyResult {
+                exists: false,
+                is_dir: false,
+                readable: false,
+                writable: false,
+                error: Some(format!("no existe o no es accesible: {e}")),
+            },
+            Ok(meta) => {
+                let is_dir = meta.is_dir();
+                let readable = if is_dir {
+                    fs::read_dir(&req.path).await.is_ok()
+                } else {
+                    fs::read(&req.path).await.is_ok()
+                };
+                let writable = if is_dir {
+                    self.probe_write(&req.path).await
+                } else {
+                    let parent = req.path.parent().unwrap_or_else(|| {
+                        std::path::Path::new(&req.path).parent().unwrap_or(std::path::Path::new("."))
+                    });
+                    self.probe_write(parent).await
+                };
+                FsVerifyResult {
+                    exists: true,
+                    is_dir,
+                    readable,
+                    writable,
+                    error: if readable && writable {
+                        None
+                    } else {
+                        Some(format!(
+                            "lectura: {}, escritura: {}",
+                            if readable { "ok" } else { "FALLA" },
+                            if writable { "ok" } else { "FALLA" },
+                        ))
+                    },
+                }
+            }
+        }
+    }
+
+    /// Create a unique probe file, read it back byte-for-byte, then
+    /// remove it. Any step failing leaves `writable=false` — and never
+    /// leaves the probe behind.
+    async fn probe_write(&self, dir: &std::path::Path) -> bool {
+        let probe_name = format!(".synthhires-verify-{}.tmp", uuid::Uuid::new_v4());
+        let probe = dir.join(probe_name);
+        let payload = format!("synthhires-verify:{}", uuid::Uuid::new_v4());
+        if fs::write(&probe, payload.as_bytes()).await.is_err() {
+            return false;
+        }
+        let read_back = match fs::read(&probe).await {
+            Ok(b) => b == payload.as_bytes(),
+            Err(_) => false,
+        };
+        let _ = fs::remove_file(&probe).await;
+        read_back
     }
 
     fn gate_for_path(&self, capability: &str, path: &Path) -> Result<()> {

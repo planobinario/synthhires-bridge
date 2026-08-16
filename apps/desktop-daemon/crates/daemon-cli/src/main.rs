@@ -590,6 +590,7 @@ async fn background_daemon_task(
                                                     "desktop.fs.read".into(),
                                                     "desktop.fs.write".into(),
                                                     "desktop.fs.delete".into(),
+                                                    "desktop.fs.verify".into(),
                                                     "sync.chat.push".into(),
                                                 ],
                                             })
