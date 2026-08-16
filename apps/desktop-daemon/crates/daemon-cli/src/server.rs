@@ -70,6 +70,7 @@ pub async fn start_http_server(
     let app = Router::new()
         .route("/status", get(handle_status))
         .route("/pair", post(handle_pair))
+        .route("/unpair", post(handle_unpair))
         .layer(cors)
         .with_state(state);
 
@@ -217,5 +218,45 @@ async fn handle_pair(
         }
     }));
 
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Local unpair so the web UI can re-bind the daemon when it was
+/// paired under a different account/session. Clears the keyring entry,
+/// state.json, and the WS client; the pairing nonce is regenerated so
+/// the browser can immediately POST /pair with its own device.
+async fn handle_unpair(
+    headers: axum::http::HeaderMap,
+    State(state): State<ServerState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    check_origin(&headers)?;
+
+    let device_id = {
+        let s = state.daemon_state.read().await;
+        s.device_id.clone()
+    };
+    if let Some(id) = device_id {
+        let _ = daemon_core::keyring::TokenStore::delete(&id);
+    }
+    {
+        let mut s = state.daemon_state.write().await;
+        s.device_id = None;
+        s.backend_url = None;
+        let _ = s.save(&state.config_dir).await;
+    }
+    // Stop the WS client
+    {
+        let mut hw = state.ws_handle.lock().await;
+        if let Some(h) = hw.take() {
+            h.abort();
+        }
+    }
+    // Fresh nonce so the browser can pair immediately
+    {
+        let mut n = state.pairing_nonce.write().await;
+        *n = Some((uuid::Uuid::new_v4().to_string(), std::time::Instant::now()));
+    }
+    let _ = state.status_tx.send("Esperando emparejamiento...".to_string());
+    tracing::info!("Unpaired via local HTTP; ready for re-pairing");
     Ok(Json(serde_json::json!({ "success": true })))
 }
