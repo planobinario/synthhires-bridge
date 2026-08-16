@@ -12,8 +12,9 @@
 //! action_result the device buffered gets re-delivered.
 
 use crate::{
-    capability::{CapabilityGate, ScopeSnapshot},
+    capability::{CapabilityGate, GateDecision, ScopeSnapshot},
     chat_store::ChatStore,
+    consent::{ConsentAnswer, ConsentBroker, ConsentPrompt},
     DaemonError, Result,
 };
 use daemon_protocol::{parse_chat_push_params, BridgeFrame, HelloFrame, PROTOCOL_VERSION};
@@ -36,6 +37,7 @@ pub struct WsClient {
     device_name: String,
     gate: std::sync::Arc<Mutex<CapabilityGate>>,
     chat_store: Arc<ChatStore>,
+    consent: std::sync::Arc<ConsentBroker>,
 }
 
 impl WsClient {
@@ -53,6 +55,7 @@ impl WsClient {
         device_name: impl Into<String>,
         gate: CapabilityGate,
         chat_store: Arc<ChatStore>,
+        consent: std::sync::Arc<ConsentBroker>,
     ) -> Self {
         Self {
             backend_url: backend_url.into(),
@@ -63,6 +66,7 @@ impl WsClient {
             device_name: device_name.into(),
             gate: std::sync::Arc::new(Mutex::new(gate)),
             chat_store,
+            consent,
         }
     }
 
@@ -109,13 +113,22 @@ impl WsClient {
                 },
             )?,
         );
+        // Defense in depth: the DO also checks this header against the
+        // token hash before accepting the socket.
+        let token_hash = hex::encode(sha2::Sha256::digest(self.token.as_bytes()));
+        req.headers_mut().insert(
+            "x-bridge-token-hash",
+            token_hash.parse().map_err(|e: http::header::InvalidHeaderValue| {
+                crate::DaemonError::Ws(format!("invalid header: {e}"))
+            })?,
+        );
         let (mut ws, _resp) = connect_async(req)
             .await
             .map_err(|e| crate::DaemonError::Ws(format!("connect: {e}")))?;
         // Send hello
         let hello = BridgeFrame::Hello(HelloFrame {
             v: PROTOCOL_VERSION,
-            token_hash: hex::encode(sha2::Sha256::digest(self.token.as_bytes())),
+            token_hash,
             fingerprint: self.fingerprint.clone(),
             device_kind: match self.device_kind {
                 "desktop" => daemon_protocol::DeviceKind::Desktop,
@@ -320,26 +333,60 @@ impl WsClient {
 
             // Consent: skip only when the server explicitly trusts the
             // action (alwaysAllowPaths configured in the web device
-            // panel). Everything else is rejected with an explicit,
-            // actionable error — the daemon never silently executes
-            // arbitrary shell commands on the user's machine.
+            // panel). Everything else raises a native prompt through the
+            // ConsentBroker — the daemon NEVER silently executes
+            // arbitrary shell commands on the user's machine, and never
+            // silently refuses them either.
             if !req.skip_consent_prompt {
-                let result = daemon_protocol::ActionResultFrame {
-                    v: PROTOCOL_VERSION,
-                    id: req.id,
-                    ok: false,
-                    output: None,
-                    error: Some(daemon_protocol::ActionError {
-                        code: "consent_required".into(),
-                        message: "Esta acción requiere consentimiento: añade la carpeta de trabajo a 'Rutas permitidas' en el panel del dispositivo (synthhires.com/space) o aprueba la acción manualmente.".into(),
-                    }),
-                    duration_ms: 0,
+                let target = req
+                    .params
+                    .get("path")
+                    .or_else(|| req.params.get("cwd"))
+                    .and_then(|v| v.as_str());
+                let prompt = ConsentPrompt {
+                    action_id: req.id.clone(),
+                    capability: req.capability.clone(),
+                    summary: cmd.to_string(),
+                    path: target.map(|p| p.to_string()),
                 };
-                ws.send(Message::Text(serde_json::to_string(
-                    &BridgeFrame::ActionResult(result),
-                )?))
-                .await?;
-                return Ok(());
+                let mut rx = self.consent.ask(prompt);
+                let answer = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    &mut rx,
+                )
+                .await;
+                let answer: ConsentAnswer = match answer {
+                    Ok(Ok(a)) => a,
+                    Ok(Err(_)) | Err(_) => ConsentAnswer::default(), // no answer = deny
+                };
+                if !answer.approved {
+                    let result = daemon_protocol::ActionResultFrame {
+                        v: PROTOCOL_VERSION,
+                        id: req.id,
+                        ok: false,
+                        output: None,
+                        error: Some(daemon_protocol::ActionError {
+                            code: "consent_denied".into(),
+                            message: "El usuario denegó el consentimiento para esta acción.".into(),
+                        }),
+                        duration_ms: 0,
+                    };
+                    ws.send(Message::Text(serde_json::to_string(
+                        &BridgeFrame::ActionResult(result),
+                    )?))
+                    .await?;
+                    return Ok(());
+                }
+                // Approved. If the user chose "always allow", persist the
+                // path into the gate snapshot so future actions on it skip
+                // the prompt.
+                if answer.remember {
+                    if let Some(path) = target {
+                        let mut g = self.gate.lock().await;
+                        let augmented = g.with_additional_path(std::path::PathBuf::from(path));
+                        *g = augmented;
+                    }
+                }
             }
         }
 
@@ -354,11 +401,50 @@ impl WsClient {
                     serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
                 match parse {
                     Ok(fs_req) => {
-                        let g = self.gate.lock().await;
-                        let ops = crate::fs_ops::FsOps::new(&g);
+                        // If the path is outside alwaysAllow, prompt once
+                        // for consent before touching the file. Approval
+                        // augments the gate for THIS operation only (unless
+                        // the user checked "remember", which persists).
+                        let gate_decision = {
+                            let g = self.gate.lock().await;
+                            g.check_path("desktop.fs.read", &fs_req.path)
+                        };
+                        let effective_gate = match gate_decision {
+                            GateDecision::Allow => self.gate.lock().await.clone(),
+                            GateDecision::Deny => {
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some("consent_denied".into()),
+                                    0,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                            GateDecision::RequireConsent => {
+                                if !self.await_path_consent(&req, &fs_req.path).await {
+                                    self.send_action_result(
+                                        ws,
+                                        req.id,
+                                        false,
+                                        None,
+                                        Some("consent_denied".into()),
+                                        0,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                                self.gate
+                                    .lock()
+                                    .await
+                                    .with_additional_path(fs_req.path.clone())
+                            }
+                        };
+                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
                         match ops.read(fs_req).await {
                             Ok(res) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -373,7 +459,6 @@ impl WsClient {
                                 .await?;
                             }
                             Err(e) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -404,11 +489,46 @@ impl WsClient {
                     serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
                 match parse {
                     Ok(fs_req) => {
-                        let g = self.gate.lock().await;
-                        let ops = crate::fs_ops::FsOps::new(&g);
+                        let gate_decision = {
+                            let g = self.gate.lock().await;
+                            g.check_path("desktop.fs.write", &fs_req.path)
+                        };
+                        let effective_gate = match gate_decision {
+                            GateDecision::Allow => self.gate.lock().await.clone(),
+                            GateDecision::Deny => {
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some("consent_denied".into()),
+                                    0,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                            GateDecision::RequireConsent => {
+                                if !self.await_path_consent(&req, &fs_req.path).await {
+                                    self.send_action_result(
+                                        ws,
+                                        req.id,
+                                        false,
+                                        None,
+                                        Some("consent_denied".into()),
+                                        0,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                                self.gate
+                                    .lock()
+                                    .await
+                                    .with_additional_path(fs_req.path.clone())
+                            }
+                        };
+                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
                         match ops.write(fs_req).await {
                             Ok(res) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -427,7 +547,6 @@ impl WsClient {
                                 .await?;
                             }
                             Err(e) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -458,11 +577,46 @@ impl WsClient {
                     serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
                 match parse {
                     Ok(fs_req) => {
-                        let g = self.gate.lock().await;
-                        let ops = crate::fs_ops::FsOps::new(&g);
+                        let gate_decision = {
+                            let g = self.gate.lock().await;
+                            g.check_path("desktop.fs.delete", &fs_req.path)
+                        };
+                        let effective_gate = match gate_decision {
+                            GateDecision::Allow => self.gate.lock().await.clone(),
+                            GateDecision::Deny => {
+                                self.send_action_result(
+                                    ws,
+                                    req.id,
+                                    false,
+                                    None,
+                                    Some("consent_denied".into()),
+                                    0,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                            GateDecision::RequireConsent => {
+                                if !self.await_path_consent(&req, &fs_req.path).await {
+                                    self.send_action_result(
+                                        ws,
+                                        req.id,
+                                        false,
+                                        None,
+                                        Some("consent_denied".into()),
+                                        0,
+                                    )
+                                    .await?;
+                                    return Ok(());
+                                }
+                                self.gate
+                                    .lock()
+                                    .await
+                                    .with_additional_path(fs_req.path.clone())
+                            }
+                        };
+                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
                         match ops.delete(fs_req).await {
                             Ok(()) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -474,7 +628,6 @@ impl WsClient {
                                 .await?;
                             }
                             Err(e) => {
-                                drop(g);
                                 self.send_action_result(
                                     ws,
                                     req.id,
@@ -626,6 +779,41 @@ impl WsClient {
             }
         }
         Ok(())
+    }
+
+    /// Ask the user for consent to touch a path outside alwaysAllow.
+    /// Returns true on approval (and persists the path when "remember"
+    /// was checked), false on denial/timeout.
+    async fn await_path_consent(
+        &self,
+        req: &daemon_protocol::ActionRequestFrame,
+        path: &std::path::Path,
+    ) -> bool {
+        let prompt = ConsentPrompt {
+            action_id: req.id.clone(),
+            capability: req.capability.clone(),
+            summary: format!(
+                "{} en {}",
+                req.capability,
+                path.display()
+            ),
+            path: Some(path.display().to_string()),
+        };
+        let mut rx = self.consent.ask(prompt);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            &mut rx,
+        )
+        .await;
+        let answer: ConsentAnswer = match answer {
+            Ok(Ok(a)) => a,
+            Ok(Err(_)) | Err(_) => ConsentAnswer::default(),
+        };
+        if answer.approved && answer.remember {
+            let mut g = self.gate.lock().await;
+            *g = g.with_additional_path(path.to_path_buf());
+        }
+        answer.approved
     }
 
     async fn send_action_result(

@@ -1,4 +1,5 @@
 use daemon_core::chat_store::{ChatStore, StoredConversation, StoredMessage};
+use daemon_core::consent::{ConsentAnswer, ConsentBroker};
 use daemon_core::task_registry::{TaskKind, TaskState, TaskStatus};
 use eframe::egui;
 use std::collections::VecDeque;
@@ -35,6 +36,7 @@ pub struct BridgeApp {
     msgs_loaded_for: Option<String>,
     conv_search: String,
     conv_error: Option<String>,
+    consent: std::sync::Arc<ConsentBroker>,
 }
 
 impl BridgeApp {
@@ -46,6 +48,7 @@ impl BridgeApp {
         ui_cmd_tx: mpsc::Sender<UiCmd>,
         log_rx: std::sync::mpsc::Receiver<String>,
         chat_store: std::sync::Arc<ChatStore>,
+        consent: std::sync::Arc<ConsentBroker>,
     ) -> Self {
         Self {
             status_rx,
@@ -67,6 +70,7 @@ impl BridgeApp {
             msgs_loaded_for: None,
             conv_search: String::new(),
             conv_error: None,
+            consent,
         }
     }
 
@@ -371,6 +375,61 @@ impl eframe::App for BridgeApp {
                                 std::process::exit(0);
                             }
                         });
+                    });
+                });
+        }
+
+        // Consent prompt overlay — the daemon raises these for actions
+        // outside alwaysAllowPaths. The user approves/denies here and the
+        // WS client awaits the answer with a bounded timeout.
+        let pending_consents = self.consent.pending();
+        if !pending_consents.is_empty() {
+            let prompt = pending_consents[0].clone();
+            egui::Window::new("🔐 Consentimiento requerido")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Capability: {}", prompt.capability))
+                            .strong()
+                            .color(txt_color),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(&prompt.summary)
+                            .color(txt_color),
+                    );
+                    if let Some(path) = &prompt.path {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("Ruta: {}", path))
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    }
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Denegar").clicked() {
+                            self.consent.answer(
+                                &prompt.action_id,
+                                ConsentAnswer { approved: false, remember: false },
+                            );
+                        }
+                        if ui.button("Permitir").clicked() {
+                            self.consent.answer(
+                                &prompt.action_id,
+                                ConsentAnswer { approved: true, remember: false },
+                            );
+                        }
+                        if prompt.path.is_some() {
+                            if ui.button("Permitir siempre en esta carpeta").clicked() {
+                                self.consent.answer(
+                                    &prompt.action_id,
+                                    ConsentAnswer { approved: true, remember: true },
+                                );
+                            }
+                        }
                     });
                 });
         }

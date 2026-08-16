@@ -168,6 +168,11 @@ fn main() -> Result<()> {
     let ui_ctx = Arc::new(tokio::sync::RwLock::new(None));
     let ui_ctx_clone = ui_ctx.clone();
 
+    // Shared consent broker: the WS client raises prompts, the UI answers.
+    let consent_broker = std::sync::Arc::new(daemon_core::ConsentBroker::new());
+    let consent_broker_bg = consent_broker.clone();
+    let consent_broker_ui = consent_broker.clone();
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -183,6 +188,7 @@ fn main() -> Result<()> {
                 ui_cmd_tx_bg,
                 ui_ctx_clone,
                 chat_store_bg,
+                consent_broker_bg,
             )
             .await
             {
@@ -224,6 +230,7 @@ fn main() -> Result<()> {
                 ui_cmd_tx,
                 log_rx,
                 chat_store.clone(),
+                consent_broker_ui,
             );
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
@@ -243,6 +250,7 @@ async fn background_daemon_task(
     ui_cmd_tx: tokio::sync::mpsc::Sender<UiCmd>,
     ui_ctx: Arc<tokio::sync::RwLock<Option<eframe::egui::Context>>>,
     chat_store: std::sync::Arc<daemon_core::ChatStore>,
+    consent: std::sync::Arc<daemon_core::ConsentBroker>,
 ) -> Result<()> {
     let cli = Cli::parse();
 
@@ -423,6 +431,7 @@ async fn background_daemon_task(
         let state_ipc = state.clone();
         let ws_handle_ipc = ws_handle.clone();
         let chat_store_ipc = chat_store.clone();
+        let consent_ipc = consent.clone();
 
         async move {
             use interprocess::local_socket::prelude::*;
@@ -498,9 +507,12 @@ async fn background_daemon_task(
                         let config_dir_clone = config_dir_ipc.clone();
                         let ws_handle_clone = ws_handle_ipc.clone();
                         let chat_store_clone = chat_store_ipc.clone();
+                        let consent_clone = consent_ipc.clone();
 
                         tokio::spawn(async move {
-                            let mut buf = [0u8; 1024];
+                            // Deep links carry URLs with UUIDs + encoded
+                            // backends; 1024 bytes is not enough.
+                            let mut buf = [0u8; 8192];
                             if let Ok(len) = stream.read(&mut buf).await {
                                 let msg = String::from_utf8_lossy(&buf[..len]).to_string();
                                 tracing::info!("IPC Received data length: {}", len);
@@ -514,47 +526,122 @@ async fn background_daemon_task(
                                         return;
                                     }
 
-                                    // Handle `pair?token=...` or `...` directly
-                                    let clean_token =
-                                        if let Some(t) = clean_uri.strip_prefix("pair?token=") {
-                                            t
-                                        } else {
-                                            clean_uri
-                                        };
-
-                                    tracing::info!("Processing deep link token: {}", clean_token);
-                                    if daemon_core::keyring::TokenStore::save(
-                                        clean_token,
-                                        clean_token,
-                                    )
-                                    .is_ok()
-                                    {
-                                        let mut s = state_clone.write().await;
-                                        s.device_id = Some(clean_token.to_string());
-                                        let _ = s.save(&config_dir_clone).await;
-
-                                        // Start WS client
-                                        let ws_state = state_clone.clone();
-                                        let ws_backend = backend_url_clone;
-                                        let ws_store = chat_store_clone.clone();
-                                        let mut hw = ws_handle_clone.lock().await;
-                                        if let Some(h) = hw.take() {
-                                            h.abort();
-                                        }
-                                        *hw = Some(tokio::spawn(async move {
-                                            if let Err(e) =
-                                                run_ws_client(ws_state, ws_backend, ws_store).await
-                                            {
-                                                tracing::error!("WS client died: {e}");
+                                    // Parse `pair?code=...&pairing_id=...&backend=...`
+                                    // The previous code did strip_prefix("pair?token=")
+                                    // and stored the WHOLE query remainder
+                                    // (including `&backend=...`) as the token —
+                                    // WS hello then hashed garbage and auth
+                                    // failed forever. Parse real query params.
+                                    let parse_param = |key: &str| -> Option<String> {
+                                        clean_uri.split('&').find_map(|part| {
+                                            let (k, v) = part.split_once('=')?;
+                                            if k.trim() == key {
+                                                let raw = v.trim();
+                                                let decoded = url_decode(raw);
+                                                Some(decoded)
+                                            } else {
+                                                None
                                             }
-                                        }));
+                                        })
+                                    };
 
-                                        tracing::info!(
-                                            "Token saved and WS client started. Sending ACK."
-                                        );
-                                        let _ = stream.write_all(b"ACK").await;
-                                    } else {
-                                        tracing::error!("Failed to save token to keyring");
+                                    let code = parse_param("code").or_else(|| {
+                                        // Legacy links used `pair?token=...`
+                                        parse_param("token")
+                                    });
+                                    let pairing_id = parse_param("pairing_id");
+                                    let backend = parse_param("backend")
+                                        .unwrap_or_else(|| backend_url_clone.clone());
+
+                                    let Some(code) = code else {
+                                        tracing::warn!("Deep link without code/token; ignoring");
+                                        let _ = stream.write_all(b"NACK").await;
+                                        return;
+                                    };
+
+                                    tracing::info!(
+                                        "Deep link pair: backend={} pairing_id={:?}",
+                                        backend,
+                                        pairing_id
+                                    );
+
+                                    // Complete the pairing SERVER-SIDE: the web
+                                    // UI started a pairing code and gave it to
+                                    // us; we must POST pair/complete to get the
+                                    // real deviceId + token. Storing the code
+                                    // itself as the token (previous behavior)
+                                    // is wrong — the server issues the token.
+                                    let client = reqwest::Client::builder()
+                                        .timeout(std::time::Duration::from_secs(30))
+                                        .build();
+                                    let complete = match client {
+                                        Ok(c) => {
+                                            let flow = daemon_core::PairingFlow::new(&backend, &c);
+                                            let fp =
+                                                daemon_core::DeviceFingerprint::collect().hash_hex();
+                                            flow.complete(daemon_core::pairing::PairCompleteRequest {
+                                                code: code.clone(),
+                                                pairing_id,
+                                                device_kind: "desktop",
+                                                device_name: hostname(),
+                                                fingerprint: fp,
+                                                desired_scopes: vec![
+                                                    "desktop.shell.execute".into(),
+                                                    "desktop.fs.read".into(),
+                                                    "desktop.fs.write".into(),
+                                                    "desktop.fs.delete".into(),
+                                                    "sync.chat.push".into(),
+                                                ],
+                                            })
+                                            .await
+                                        }
+                                        Err(e) => Err(daemon_core::DaemonError::Protocol(format!(
+                                            "reqwest client: {e}"
+                                        ))),
+                                    };
+
+                                    match complete {
+                                        Ok(res) => {
+                                            {
+                                                let mut s = state_clone.write().await;
+                                                s.device_id = Some(res.device_id.clone());
+                                                s.backend_url = Some(backend.clone());
+                                                let _ = s.save(&config_dir_clone).await;
+                                            }
+
+                                            // Start WS client with the REAL
+                                            // backend + deviceId.
+                                            let ws_state = state_clone.clone();
+                                            let ws_backend = res.ws_url.clone();
+                                            let ws_store = chat_store_clone.clone();
+                                            let ws_consent = consent_clone.clone();
+                                            let mut hw = ws_handle_clone.lock().await;
+                                            if let Some(h) = hw.take() {
+                                                h.abort();
+                                            }
+                                            *hw = Some(tokio::spawn(async move {
+                                                if let Err(e) = run_ws_client(
+                                                    ws_state,
+                                                    ws_backend,
+                                                    ws_store,
+                                                    ws_consent,
+                                                )
+                                                .await
+                                                {
+                                                    tracing::error!("WS client died: {e}");
+                                                }
+                                            }));
+
+                                            tracing::info!(
+                                                "Paired device {}; WS client started. ACK.",
+                                                res.device_id
+                                            );
+                                            let _ = stream.write_all(b"ACK").await;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("pair/complete failed: {e}");
+                                            let _ = stream.write_all(b"NACK").await;
+                                        }
                                     }
                                 } else {
                                     tracing::warn!("Received unrecognized IPC message");
@@ -579,10 +666,11 @@ async fn background_daemon_task(
         let ws_backend = saved_url.unwrap_or(backend_url.clone());
         let status_tx_clone = status_tx.clone();
         let ws_store = chat_store.clone();
+        let ws_consent = consent.clone();
         let mut hw = ws_handle.try_lock().expect("No lock contention at startup");
         *hw = Some(tokio::spawn(async move {
             let _ = status_tx_clone.send("Conectando al servidor...".to_string());
-            if let Err(e) = run_ws_client(ws_state, ws_backend, ws_store).await {
+            if let Err(e) = run_ws_client(ws_state, ws_backend, ws_store, ws_consent).await {
                 tracing::error!("WS client died: {e}");
                 let _ = status_tx_clone.send(format!("Error de conexión: {e}"));
             }
@@ -611,6 +699,7 @@ async fn background_daemon_task(
             last_poll: last_poll.clone(),
             ws_handle: ws_handle.clone(),
             chat_store: chat_store.clone(),
+            consent: consent.clone(),
         };
         async move {
             if let Err(e) = server::start_http_server(server_state, local_port).await {
@@ -631,6 +720,7 @@ async fn run_ws_client(
     state: Arc<RwLock<DaemonState>>,
     backend_url: String,
     chat_store: std::sync::Arc<daemon_core::ChatStore>,
+    consent: std::sync::Arc<daemon_core::ConsentBroker>,
 ) -> Result<()> {
     let device_id = {
         let s = state.read().await;
@@ -655,6 +745,7 @@ async fn run_ws_client(
         hostname(),
         gate,
         chat_store,
+        consent,
     );
     ws.run().await
 }
@@ -663,4 +754,31 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "unknown".into())
+}
+
+/// Minimal percent-decoder for deep-link query values (RFC 3986).
+fn url_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

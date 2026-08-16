@@ -21,6 +21,7 @@ pub struct ServerState {
     pub last_poll: Arc<std::sync::atomic::AtomicU64>,
     pub ws_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub chat_store: std::sync::Arc<daemon_core::ChatStore>,
+    pub consent: std::sync::Arc<daemon_core::ConsentBroker>,
 }
 
 #[derive(Serialize)]
@@ -34,6 +35,8 @@ pub struct PairRequest {
     token: String,
     backend_url: String,
     nonce: String,
+    #[serde(default)]
+    device_id: Option<String>,
 }
 
 pub async fn start_http_server(
@@ -169,8 +172,20 @@ async fn handle_pair(
 
     tracing::info!("Valid pairing request received via local HTTP. Token handoff starting...");
 
-    // Guardar token en el llavero local (Keyring)
-    if daemon_core::keyring::TokenStore::save(&payload.token, &payload.token).is_err() {
+    // The web UI knows the REAL deviceId from pair/complete. Without it
+    // (legacy clients) we cannot key the OS keyring correctly, because
+    // the daemon loads the token by deviceId at startup. Reject instead
+    // of storing the token AS the deviceId — that corrupts state.json.
+    let device_id = match payload.device_id.clone() {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => {
+            tracing::error!("Rejecting /pair: missing device_id");
+            return Err((StatusCode::BAD_REQUEST, "Missing device_id"));
+        }
+    };
+
+    // Guardar token en el llavero local (Keyring) bajo el deviceId REAL
+    if daemon_core::keyring::TokenStore::save(&device_id, &payload.token).is_err() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to save token to keyring",
@@ -180,7 +195,7 @@ async fn handle_pair(
     // Actualizar estado
     {
         let mut s = state.daemon_state.write().await;
-        s.device_id = Some(payload.token.clone());
+        s.device_id = Some(device_id);
         s.backend_url = Some(payload.backend_url.clone());
         let _ = s.save(&state.config_dir).await;
     }
@@ -189,13 +204,14 @@ async fn handle_pair(
     let ws_state = state.daemon_state.clone();
     let status_tx = state.status_tx.clone();
     let ws_store = state.chat_store.clone();
+    let ws_consent = state.consent.clone();
     let mut hw = state.ws_handle.lock().await;
     if let Some(h) = hw.take() {
         h.abort();
     }
     *hw = Some(tokio::spawn(async move {
         let _ = status_tx.send("Conectando al servidor...".to_string());
-        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store).await {
+        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store, ws_consent).await {
             tracing::error!("WS client died: {e}");
             let _ = status_tx.send(format!("Error de conexión: {e}"));
         }

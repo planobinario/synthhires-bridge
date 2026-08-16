@@ -39,6 +39,7 @@ pub enum GateDecision {
     Deny,
 }
 
+#[derive(Debug, Clone)]
 pub struct CapabilityGate {
     snapshot: ScopeSnapshot,
 }
@@ -50,6 +51,17 @@ impl CapabilityGate {
 
     pub fn update(&mut self, snapshot: ScopeSnapshot) {
         self.snapshot = snapshot;
+    }
+
+    /// Clone with one extra path appended to the always-allow list.
+    /// Used for single-action consent: the user approved one path, so
+    /// exactly that operation runs under an augmented gate without
+    /// mutating the connection-wide snapshot (unless they also said
+    /// "remember").
+    pub fn with_additional_path(&self, path: PathBuf) -> Self {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.always_allow_paths.push(path);
+        Self { snapshot }
     }
 
     pub fn allows(&self, capability: &str) -> bool {

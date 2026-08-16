@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairCompleteRequest {
     pub code: String,
     pub pairing_id: Option<String>,
@@ -23,6 +24,7 @@ pub struct PairCompleteRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PairCompleteResponse {
     pub device_id: String,
     pub token: String,
@@ -66,11 +68,23 @@ impl<'a> PairingFlow<'a> {
             .json()
             .await
             .map_err(|e| crate::DaemonError::Protocol(format!("pair/complete decode: {e}")))?;
+        // The web API returns a relative wsUrl ('/api/devices/ws'). Resolve
+        // it against the backend origin so the WS client dials a real URL.
+        let ws_url = if body.ws_url.starts_with("ws://") || body.ws_url.starts_with("wss://") {
+            body.ws_url
+        } else {
+            let origin = self
+                .backend_url
+                .trim_end_matches('/')
+                .replace("https://", "wss://")
+                .replace("http://", "ws://");
+            format!("{}{}", origin, body.ws_url)
+        };
         // Persist the token to the OS keyring; the state.json holds
         // the deviceId + scopes. The raw token never touches disk in
         // plaintext.
         TokenStore::save(&body.device_id, &body.token)?;
-        Ok(body)
+        Ok(PairCompleteResponse { ws_url, ..body })
     }
 }
 
