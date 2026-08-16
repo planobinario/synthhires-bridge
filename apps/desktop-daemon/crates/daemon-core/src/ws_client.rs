@@ -15,6 +15,7 @@ use crate::{
     capability::{CapabilityGate, GateDecision, ScopeSnapshot},
     chat_store::ChatStore,
     consent::{ConsentAnswer, ConsentBroker, ConsentPrompt},
+    health::WsHealth,
     DaemonError, Result,
 };
 use daemon_protocol::{parse_chat_push_params, BridgeFrame, HelloFrame, PROTOCOL_VERSION};
@@ -38,6 +39,7 @@ pub struct WsClient {
     gate: std::sync::Arc<Mutex<CapabilityGate>>,
     chat_store: Arc<ChatStore>,
     consent: std::sync::Arc<ConsentBroker>,
+    health: std::sync::Arc<WsHealth>,
 }
 
 impl WsClient {
@@ -56,6 +58,7 @@ impl WsClient {
         gate: CapabilityGate,
         chat_store: Arc<ChatStore>,
         consent: std::sync::Arc<ConsentBroker>,
+        health: std::sync::Arc<WsHealth>,
     ) -> Self {
         Self {
             backend_url: backend_url.into(),
@@ -67,7 +70,12 @@ impl WsClient {
             gate: std::sync::Arc::new(Mutex::new(gate)),
             chat_store,
             consent,
+            health,
         }
+    }
+
+    pub fn health(&self) -> std::sync::Arc<WsHealth> {
+        self.health.clone()
     }
 
     /// Run the connection loop. Returns only on unrecoverable error
@@ -79,14 +87,19 @@ impl WsClient {
             match self.connect_once().await {
                 Ok(()) => {
                     // Graceful close; treat as a normal reconnect.
+                    self.health.mark_disconnected();
                     tracing::info!("WS closed cleanly; reconnecting in {:?}", backoff);
                 }
                 Err(crate::DaemonError::Protocol(msg))
                     if msg.contains("auth_failed") || msg.contains("revoked") =>
                 {
+                    self.health.set_error(&msg);
+                    self.health.mark_disconnected();
                     return Err(crate::DaemonError::Protocol(msg));
                 }
                 Err(e) => {
+                    self.health.set_error(&e.to_string());
+                    self.health.mark_disconnected();
                     tracing::warn!("WS error: {e}; reconnecting in {:?}", backoff);
                 }
             }
@@ -154,6 +167,7 @@ impl WsClient {
         let ack = match ack {
             BridgeFrame::HelloAck(ack) => ack,
             BridgeFrame::Error(e) => {
+                self.health.set_error(&format!("{}: {}", e.code, e.message));
                 return Err(crate::DaemonError::Protocol(format!(
                     "{}: {}",
                     e.code, e.message
@@ -161,6 +175,7 @@ impl WsClient {
             }
             _ => return Err(crate::DaemonError::Protocol("expected hello_ack".into())),
         };
+        self.health.mark_connected();
         // Update scope cache
         let mut g = self.gate.lock().await;
         let scopes = ScopeSnapshot::from(&ack.scopes);
@@ -179,6 +194,9 @@ impl WsClient {
                     match msg {
                         Message::Text(t) => {
                             let frame: BridgeFrame = serde_json::from_str(&t)?;
+                            if let BridgeFrame::HeartbeatAck(ref ack) = frame {
+                                self.health.mark_heartbeat_ack(ack.t);
+                            }
                             self.handle_frame(&mut ws, frame).await?;
                         }
                         Message::Close(c) => {

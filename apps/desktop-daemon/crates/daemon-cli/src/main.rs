@@ -1,7 +1,8 @@
 //! SynthHires Desktop Daemon — binary entry point.
 //!
 //! Lifecycle:
-//!   1. Parse CLI args (clap).
+//!   1. Parse CLI args (clap) — agent-friendly subcommands
+//!      (status/doctor/verify/logs/pair/unpair/stop) run standalone.
 //!   2. Acquire single-instance lock (if already running, open local dashboard in browser).
 //!   3. Load state from ~/.config/synthhires-bridge/state.json.
 //!   4. If paired, read token from OS keyring, spawn WS client loop.
@@ -25,6 +26,7 @@ use daemon_core::{
     DaemonError, Result,
 };
 
+mod console;
 mod server;
 mod tray;
 mod ui;
@@ -33,7 +35,8 @@ mod ui;
 #[command(
     name = "synthhires-bridge",
     version,
-    about = "Bridges your agents to your PC's filesystem and terminal."
+    about = "Bridges your agents to your PC's filesystem and terminal.",
+    subcommand_negates_reqs = true
 )]
 struct Cli {
     #[arg(long, env = "SYNTHHIRES_BACKEND_URL")]
@@ -44,7 +47,72 @@ struct Cli {
 
     #[arg(long)]
     config_dir: Option<PathBuf>,
+
+    /// Agent-facing control subcommands. The daemon itself runs when NO
+    /// subcommand is given (or via `run`).
+    #[command(subcommand)]
+    command: Option<Cmd>,
 }
+
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// Start the daemon in the foreground (same as no subcommand).
+    Run,
+    /// Full JSON status: pairing, WS health, keyring, version.
+    Status {
+        /// Raw JSON output (default: human-readable table).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diagnostic report: state file, keyring, HTTP endpoint, WS state.
+    Doctor {
+        /// Raw JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Empirically verify read+write access to a path on THIS machine.
+    Verify {
+        /// Absolute path to probe.
+        path: PathBuf,
+        /// Raw JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tail the daemon's on-disk log.
+    Logs {
+        /// Number of lines (default 100).
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
+    /// Pair the daemon with a backend using a pairing code.
+    Pair {
+        /// Backend origin (e.g. https://app.synthhires.com).
+        backend: String,
+        /// Pairing code shown by the web UI.
+        code: String,
+        /// Pairing id shown by the web UI (desktop mode).
+        #[arg(long)]
+        pairing_id: Option<String>,
+    },
+    /// Unpair the daemon (clears keyring + state).
+    Unpair,
+    /// Stop a running daemon via its local HTTP endpoint.
+    Stop,
+}
+
+fn config_dir_of(cli: &Cli) -> PathBuf {
+    cli.config_dir.clone().unwrap_or_else(|| {
+        directories::ProjectDirs::from("com", "synthhires", "bridge")
+            .map(|d| d.config_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                dirs_next::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join("synthhires-bridge")
+            })
+    })
+}
+
+const LOCAL_ORIGIN: &str = "http://localhost:4321";
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct DaemonState {
@@ -127,11 +195,38 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for UiLogger {
 }
 
 fn main() -> Result<()> {
+    // Agent-friendly subcommands run BEFORE any daemon setup: they are
+    // small, side-effect-free (except stop/pair/unpair) and print plain
+    // JSON/table output with conventional exit codes.
+    let cli = Cli::parse();
+    if let Some(ref cmd) = cli.command {
+        // `run` is an alias for the default daemon mode — fall through.
+        if !matches!(cmd, Cmd::Run) {
+            console::attach();
+            return run_cli_command(cmd, &cli);
+        }
+    }
+
+    let config_dir = config_dir_of(&cli);
+    std::fs::create_dir_all(&config_dir).ok();
+
     let (log_tx, log_rx) = std::sync::mpsc::sync_channel(2000);
     let ui_logger = UiLogger { tx: log_tx };
 
+    // Persist the log to disk so `synthhires-bridge logs` and agents
+    // can debug without scraping stdout (which was a windowless void
+    // before). Daily rotation, max 2 files, inside the config dir with
+    // the `daemon.` prefix (files look like daemon.2026-08-16.log).
+    let file_logger = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("daemon")
+        .filename_suffix("log")
+        .max_log_files(2)
+        .build(&config_dir)
+        .unwrap_or_else(|_| tracing_appender::rolling::never(&config_dir, "daemon-fallback.log"));
+
     use tracing_subscriber::fmt::writer::MakeWriterExt;
-    let both = std::io::stdout.and(ui_logger);
+    let both = std::io::stdout.and(ui_logger).and(file_logger);
 
     // Start tracing early
     tracing_subscriber::fmt()
@@ -144,6 +239,7 @@ fn main() -> Result<()> {
         )
         .with_writer(both)
         .init();
+    tracing::info!("Daemon starting, logs under {}", config_dir.display());
 
     // Local chat archive: single ChatStore instance shared by the WS
     // client (writes) and the UI's "Conversaciones" tab (reads/export).
@@ -173,6 +269,10 @@ fn main() -> Result<()> {
     let consent_broker_bg = consent_broker.clone();
     let consent_broker_ui = consent_broker.clone();
 
+    // Shared WS health: updated by the client, exposed via /status + CLI.
+    let ws_health = std::sync::Arc::new(daemon_core::WsHealth::new());
+    let ws_health_bg = ws_health.clone();
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -189,6 +289,7 @@ fn main() -> Result<()> {
                 ui_ctx_clone,
                 chat_store_bg,
                 consent_broker_bg,
+                ws_health_bg,
             )
             .await
             {
@@ -251,6 +352,7 @@ async fn background_daemon_task(
     ui_ctx: Arc<tokio::sync::RwLock<Option<eframe::egui::Context>>>,
     chat_store: std::sync::Arc<daemon_core::ChatStore>,
     consent: std::sync::Arc<daemon_core::ConsentBroker>,
+    ws_health: std::sync::Arc<daemon_core::WsHealth>,
 ) -> Result<()> {
     let cli = Cli::parse();
 
@@ -432,6 +534,7 @@ async fn background_daemon_task(
         let ws_handle_ipc = ws_handle.clone();
         let chat_store_ipc = chat_store.clone();
         let consent_ipc = consent.clone();
+        let health_ipc = ws_health.clone();
 
         async move {
             use interprocess::local_socket::prelude::*;
@@ -508,6 +611,7 @@ async fn background_daemon_task(
                         let ws_handle_clone = ws_handle_ipc.clone();
                         let chat_store_clone = chat_store_ipc.clone();
                         let consent_clone = consent_ipc.clone();
+                        let health_clone = health_ipc.clone();
 
                         tokio::spawn(async move {
                             // Deep links carry URLs with UUIDs + encoded
@@ -616,6 +720,7 @@ async fn background_daemon_task(
                                             let ws_backend = res.ws_url.clone();
                                             let ws_store = chat_store_clone.clone();
                                             let ws_consent = consent_clone.clone();
+                                            let ws_health_clone = health_clone.clone();
                                             let mut hw = ws_handle_clone.lock().await;
                                             if let Some(h) = hw.take() {
                                                 h.abort();
@@ -626,6 +731,7 @@ async fn background_daemon_task(
                                                     ws_backend,
                                                     ws_store,
                                                     ws_consent,
+                                                    ws_health_clone,
                                                 )
                                                 .await
                                                 {
@@ -668,10 +774,11 @@ async fn background_daemon_task(
         let status_tx_clone = status_tx.clone();
         let ws_store = chat_store.clone();
         let ws_consent = consent.clone();
+        let ws_health_clone = ws_health.clone();
         let mut hw = ws_handle.try_lock().expect("No lock contention at startup");
         *hw = Some(tokio::spawn(async move {
             let _ = status_tx_clone.send("Conectando al servidor...".to_string());
-            if let Err(e) = run_ws_client(ws_state, ws_backend, ws_store, ws_consent).await {
+            if let Err(e) = run_ws_client(ws_state, ws_backend, ws_store, ws_consent, ws_health_clone).await {
                 tracing::error!("WS client died: {e}");
                 let _ = status_tx_clone.send(format!("Error de conexión: {e}"));
             }
@@ -701,6 +808,7 @@ async fn background_daemon_task(
             ws_handle: ws_handle.clone(),
             chat_store: chat_store.clone(),
             consent: consent.clone(),
+            ws_health: ws_health.clone(),
         };
         async move {
             if let Err(e) = server::start_http_server(server_state, local_port).await {
@@ -722,6 +830,7 @@ async fn run_ws_client(
     backend_url: String,
     chat_store: std::sync::Arc<daemon_core::ChatStore>,
     consent: std::sync::Arc<daemon_core::ConsentBroker>,
+    ws_health: std::sync::Arc<daemon_core::WsHealth>,
 ) -> Result<()> {
     let device_id = {
         let s = state.read().await;
@@ -747,6 +856,7 @@ async fn run_ws_client(
         gate,
         chat_store,
         consent,
+        ws_health,
     );
     ws.run().await
 }
@@ -782,4 +892,332 @@ fn url_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// ── Agent-facing CLI subcommands ──────────────────────────────────────
+//
+// Every subcommand prints either plain JSON (--json) or a readable
+// table, and exits non-zero on failure so scripts/agents can branch on
+// `$?`. No daemon state is touched except where documented.
+
+fn run_cli_command(cmd: &Cmd, cli: &Cli) -> Result<()> {
+    let config_dir = config_dir_of(cli);
+    match cmd {
+        Cmd::Run => {
+            // Unreachable via run_cli_command: `run` falls through to
+            // the daemon body in main(). Kept for match completeness.
+            std::process::exit(0);
+        }
+        Cmd::Status { json } => cmd_status(&config_dir, *json),
+        Cmd::Doctor { json } => cmd_doctor(&config_dir, *json),
+        Cmd::Verify { path, json } => cmd_verify(path.clone(), *json),
+        Cmd::Logs { lines } => cmd_logs(&config_dir, *lines),
+        Cmd::Pair { backend, code, pairing_id } => {
+            cmd_pair(&config_dir, backend.clone(), code.clone(), pairing_id.clone())
+        }
+        Cmd::Unpair => cmd_unpair(&config_dir),
+        Cmd::Stop => cmd_stop(),
+    }
+}
+
+fn read_state(config_dir: &std::path::Path) -> DaemonState {
+    let path = config_dir.join("state.json");
+    let raw = std::fs::read(&path).unwrap_or_default();
+    serde_json::from_slice(&raw).unwrap_or(DaemonState {
+        device_id: None,
+        scopes: daemon_protocol::Scopes::default(),
+        backend_url: None,
+    })
+}
+
+fn write_state(config_dir: &std::path::Path, state: &DaemonState) -> Result<()> {
+    std::fs::create_dir_all(config_dir).ok();
+    let raw = serde_json::to_vec_pretty(state).map_err(DaemonError::Json)?;
+    std::fs::write(config_dir.join("state.json"), raw).map_err(DaemonError::Io)?;
+    Ok(())
+}
+
+fn local_http_get(path: &str) -> Option<serde_json::Value> {
+    let url = format!("http://127.0.0.1:7333{path}");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let res = client
+        .get(&url)
+        .header("Origin", LOCAL_ORIGIN)
+        .send()
+        .ok()?;
+    res.json().ok()
+}
+
+fn cmd_status(config_dir: &std::path::Path, json: bool) -> Result<()> {
+    let state = read_state(config_dir);
+    let remote = local_http_get("/status");
+    let keyring_ok = match &state.device_id {
+        Some(id) => TokenStore::load(id).map(|t| t.is_some()).unwrap_or(false),
+        None => false,
+    };
+
+    let paired = state.device_id.is_some();
+    let ws_connected = remote
+        .as_ref()
+        .and_then(|r| r.get("ws"))
+        .and_then(|w| w.get("connected"))
+        .and_then(|c| c.as_bool())
+        .unwrap_or(false);
+    let version = remote
+        .as_ref()
+        .and_then(|r| r.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_string();
+
+    if json {
+        let out = serde_json::json!({
+            "version": version,
+            "paired": paired,
+            "deviceId": state.device_id,
+            "keyringToken": keyring_ok,
+            "backendUrl": state.backend_url,
+            "wsConnected": ws_connected,
+            "daemonHttp": remote.is_some(),
+            "daemonRunning": remote.is_some(),
+        });
+        cprintln!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        cprintln!("synthhires-bridge v{version}");
+        cprintln!("  running      : {}", if remote.is_some() { "yes" } else { "no" });
+        cprintln!("  paired       : {}", if paired { "yes" } else { "no" });
+        if let Some(id) = &state.device_id {
+            cprintln!("  device_id    : {id}");
+        }
+        cprintln!("  keyring token: {}", if keyring_ok { "present" } else { "missing" });
+        cprintln!("  ws connected : {}", if ws_connected { "yes" } else { "no" });
+        if let Some(u) = &state.backend_url {
+            cprintln!("  backend      : {u}");
+        }
+    }
+    if paired && !ws_connected {
+        std::process::exit(2);
+    }
+    if !remote.is_some() {
+        std::process::exit(3);
+    }
+    Ok(())
+}
+
+fn cmd_doctor(config_dir: &std::path::Path, json: bool) -> Result<()> {
+    let state_path = config_dir.join("state.json");
+    let state = read_state(config_dir);
+    let remote = local_http_get("/status");
+
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    checks.push((
+        "state.json exists".into(),
+        state_path.exists(),
+        state_path.display().to_string(),
+    ));
+    checks.push((
+        "daemon HTTP (7333) reachable".into(),
+        remote.is_some(),
+        "http://127.0.0.1:7333/status".into(),
+    ));
+    let keyring_ok = match &state.device_id {
+        Some(id) => TokenStore::load(id).map(|t| t.is_some()).unwrap_or(false),
+        None => false,
+    };
+    checks.push(("keyring token present".into(), keyring_ok, "".into()));
+    let ws_ok = remote
+        .as_ref()
+        .and_then(|r| r.get("ws"))
+        .and_then(|w| w.get("connected"))
+        .and_then(|c| c.as_bool())
+        .unwrap_or(false);
+    checks.push(("WS connected".into(), ws_ok, "".into()));
+
+    if json {
+        let out = serde_json::json!({
+            "checks": checks.iter().map(|(n, ok, d)| serde_json::json!({
+                "name": n, "ok": ok, "detail": d,
+            })).collect::<Vec<_>>(),
+            "state": {
+                "paired": state.device_id.is_some(),
+                "deviceId": state.device_id,
+                "backendUrl": state.backend_url,
+            },
+            "ws": remote.as_ref().and_then(|r| r.get("ws")).cloned(),
+        });
+        cprintln!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        for (name, ok, detail) in &checks {
+            let mark = if *ok { "[ok]" } else { "[FAIL]" };
+            let extra = if detail.is_empty() { String::new() } else { format!(" — {detail}") };
+            cprintln!("{mark} {name}{extra}");
+        }
+    }
+    if checks.iter().any(|(_, ok, _)| !ok) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_verify(path: std::path::PathBuf, json: bool) -> Result<()> {
+    // Direct empirical verification WITHOUT the WS roundtrip: the same
+    // probe fs_ops::verify uses, executed here by the CLI itself.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e.to_string())))?;
+    let result = rt.block_on(async {
+        let gate = CapabilityGate::new(ScopeSnapshot {
+            capabilities: vec!["desktop.fs.verify".into()],
+            always_allow_paths: vec![],
+        });
+        let ops = daemon_core::FsOps::new(&gate);
+        ops.verify(daemon_core::fs_ops::FsVerifyRequest { path: path.clone() }).await
+    });
+    let verified = result.exists && result.readable && result.writable;
+    if json {
+        let out = serde_json::json!({
+            "path": path.display().to_string(),
+            "verified": verified,
+            "exists": result.exists,
+            "isDir": result.is_dir,
+            "readable": result.readable,
+            "writable": result.writable,
+            "error": result.error,
+        });
+        cprintln!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        cprintln!("path     : {}", path.display());
+        cprintln!("exists   : {}", if result.exists { "yes" } else { "NO" });
+        cprintln!("is_dir   : {}", if result.is_dir { "yes" } else { "no" });
+        cprintln!("readable : {}", if result.readable { "yes" } else { "NO" });
+        cprintln!("writable : {}", if result.writable { "yes" } else { "NO" });
+        if let Some(e) = &result.error {
+            cprintln!("error    : {e}");
+        }
+    }
+    if !verified {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_logs(config_dir: &std::path::Path, lines: usize) -> Result<()> {
+    // Find the newest daemon.<date>.log (the rolling appender writes
+    // daily files named daemon.YYYY-MM-DD.log).
+    let newest = std::fs::read_dir(config_dir)
+        .ok()
+        .and_then(|entries| {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("daemon")
+                        && e.path().extension().is_some_and(|x| x == "log")
+                })
+                .collect();
+            files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+            files.pop().map(|e| e.path())
+        })
+        .or_else(|| {
+            let fallback = config_dir.join("daemon-fallback.log");
+            fallback.exists().then_some(fallback)
+        });
+    let Some(log_path) = newest else {
+        ceprintln!("no log files yet under {}", config_dir.display());
+        std::process::exit(1);
+    };
+    let raw = std::fs::read_to_string(&log_path).map_err(DaemonError::Io)?;
+    let tail: Vec<&str> = raw.lines().rev().take(lines).collect();
+    for line in tail.iter().rev() {
+        cprintln!("{line}");
+    }
+    Ok(())
+}
+
+fn cmd_pair(
+    config_dir: &std::path::Path,
+    backend: String,
+    code: String,
+    pairing_id: Option<String>,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| DaemonError::Io(std::io::Error::other(e.to_string())))?;
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| DaemonError::Protocol(format!("reqwest client: {e}")))?;
+        let flow = daemon_core::PairingFlow::new(&backend, &client);
+        let fp = DeviceFingerprint::collect().hash_hex();
+        let res = flow
+            .complete(daemon_core::pairing::PairCompleteRequest {
+                code,
+                pairing_id,
+                device_kind: "desktop",
+                device_name: hostname(),
+                fingerprint: fp,
+                desired_scopes: vec![
+                    "desktop.shell.execute".into(),
+                    "desktop.fs.read".into(),
+                    "desktop.fs.write".into(),
+                    "desktop.fs.delete".into(),
+                    "desktop.fs.verify".into(),
+                    "sync.chat.push".into(),
+                ],
+            })
+            .await?;
+        let state = DaemonState {
+            device_id: Some(res.device_id.clone()),
+            scopes: res.scopes.clone(),
+            backend_url: Some(res.ws_url.clone()),
+        };
+        write_state(config_dir, &state)?;
+        cprintln!("paired device: {}", res.device_id);
+        cprintln!("ws url       : {}", res.ws_url);
+        cprintln!("note         : restart the daemon to connect (or use `run`).");
+        Ok(())
+    })
+}
+
+fn cmd_unpair(config_dir: &std::path::Path) -> Result<()> {
+    let state = read_state(config_dir);
+    if let Some(id) = &state.device_id {
+        let _ = TokenStore::delete(id);
+    }
+    write_state(
+        config_dir,
+        &DaemonState {
+            device_id: None,
+            scopes: daemon_protocol::Scopes::default(),
+            backend_url: None,
+        },
+    )?;
+    cprintln!("unpaired (keyring entry + state.json cleared)");
+    Ok(())
+}
+
+fn cmd_stop() -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| DaemonError::Protocol(format!("reqwest client: {e}")))?;
+    let res = client
+        .post("http://127.0.0.1:7333/shutdown")
+        .header("Origin", LOCAL_ORIGIN)
+        .send()
+        .map_err(|e| DaemonError::Protocol(format!("stop request: {e}")))?;
+    if res.status().is_success() {
+        cprintln!("shutdown requested");
+        Ok(())
+    } else {
+        ceprintln!("daemon answered HTTP {} — is it running?", res.status());
+        std::process::exit(1);
+    }
 }

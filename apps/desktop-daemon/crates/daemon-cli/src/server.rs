@@ -22,12 +22,17 @@ pub struct ServerState {
     pub ws_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub chat_store: std::sync::Arc<daemon_core::ChatStore>,
     pub consent: std::sync::Arc<daemon_core::ConsentBroker>,
+    pub ws_health: std::sync::Arc<daemon_core::WsHealth>,
 }
 
 #[derive(Serialize)]
 pub struct StatusResponse {
     paired: bool,
     nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_id: Option<String>,
+    version: &'static str,
+    ws: daemon_core::WsHealthSnapshot,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +76,7 @@ pub async fn start_http_server(
         .route("/status", get(handle_status))
         .route("/pair", post(handle_pair))
         .route("/unpair", post(handle_unpair))
+        .route("/shutdown", post(handle_shutdown))
         .layer(cors)
         .with_state(state);
 
@@ -135,10 +141,31 @@ async fn handle_status(
         None
     };
 
+    let device_id = state.daemon_state.read().await.device_id.clone();
+
     Ok(Json(StatusResponse {
         paired: is_paired,
         nonce,
+        device_id,
+        version: env!("CARGO_PKG_VERSION"),
+        ws: state.ws_health.snapshot(),
     }))
+}
+
+/// Graceful shutdown: local endpoint so the web UI (or a CLI agent)
+/// can stop the daemon cleanly instead of killing the process.
+async fn handle_shutdown(
+    headers: axum::http::HeaderMap,
+    State(_state): State<ServerState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, &'static str)> {
+    check_origin(&headers)?;
+    tracing::info!("Shutdown requested via local HTTP");
+    // Give the response a moment to flush before the process exits.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::process::exit(0);
+    });
+    Ok(Json(serde_json::json!({ "success": true, "message": "shutting down" })))
 }
 
 async fn handle_pair(
@@ -206,13 +233,14 @@ async fn handle_pair(
     let status_tx = state.status_tx.clone();
     let ws_store = state.chat_store.clone();
     let ws_consent = state.consent.clone();
+    let ws_health = state.ws_health.clone();
     let mut hw = state.ws_handle.lock().await;
     if let Some(h) = hw.take() {
         h.abort();
     }
     *hw = Some(tokio::spawn(async move {
         let _ = status_tx.send("Conectando al servidor...".to_string());
-        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store, ws_consent).await {
+        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store, ws_consent, ws_health).await {
             tracing::error!("WS client died: {e}");
             let _ = status_tx.send(format!("Error de conexión: {e}"));
         }

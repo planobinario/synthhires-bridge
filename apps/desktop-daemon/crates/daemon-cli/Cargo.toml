@@ -44,6 +44,8 @@ tray-icon = { workspace = true }
 dirs-next = "2"
 open = "5"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 # Deep-link pairing flow (IPC handler completes pair/complete over HTTPS).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# On-disk rolling log for `synthhires-bridge logs` + agent debugging.
+tracing-appender = "0.2"
