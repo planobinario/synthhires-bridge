@@ -70,7 +70,11 @@ impl<'a> ShellRunner<'a> {
             ));
         }
         let timeout = req.timeout_ms.unwrap_or(30_000);
-        let mut cmd = if cfg!(windows) {
+        // NOTE: `cfg!` (runtime) compiles BOTH branches on every target, and
+        // `tokio::process::Command::raw_arg` only exists on Windows — so this
+        // must be a compile-time `#[cfg]`, or the Unix build fails.
+        #[cfg(windows)]
+        let mut cmd = {
             // /C runs the command and exits. `raw_arg` appends the command
             // line VERBATIM, without `Command::arg`'s C-runtime re-quoting.
             // That re-quoting is exactly what breaks quoted Windows paths
@@ -84,7 +88,9 @@ impl<'a> ShellRunner<'a> {
             let mut c = Command::new("cmd.exe");
             c.raw_arg("/C").raw_arg(&req.command);
             c
-        } else {
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
             let mut c = Command::new("bash");
             c.arg("-lc").arg(&req.command);
             c
