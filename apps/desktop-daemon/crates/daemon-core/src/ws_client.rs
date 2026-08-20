@@ -568,6 +568,16 @@ impl WsClient {
         capability: &str,
         path: &std::path::Path,
     ) -> Result<CapabilityGate> {
+        if !self.gate.lock().await.allows(capability) {
+            return Err(DaemonError::CapabilityDenied(capability.into()));
+        }
+        if request.skip_consent_prompt {
+            return Ok(self
+                .gate
+                .lock()
+                .await
+                .with_additional_path(path.to_path_buf()));
+        }
         match self.gate.lock().await.check_path(capability, path) {
             GateDecision::Allow => Ok(self.gate.lock().await.clone()),
             GateDecision::Deny => Err(DaemonError::CapabilityDenied(capability.into())),
