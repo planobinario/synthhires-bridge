@@ -165,7 +165,9 @@ async fn handle_shutdown(
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         std::process::exit(0);
     });
-    Ok(Json(serde_json::json!({ "success": true, "message": "shutting down" })))
+    Ok(Json(
+        serde_json::json!({ "success": true, "message": "shutting down" }),
+    ))
 }
 
 async fn handle_pair(
@@ -240,7 +242,15 @@ async fn handle_pair(
     }
     *hw = Some(tokio::spawn(async move {
         let _ = status_tx.send("Conectando al servidor...".to_string());
-        if let Err(e) = crate::run_ws_client(ws_state, payload.backend_url, ws_store, ws_consent, ws_health).await {
+        if let Err(e) = crate::run_ws_client(
+            ws_state,
+            payload.backend_url,
+            ws_store,
+            ws_consent,
+            ws_health,
+        )
+        .await
+        {
             tracing::error!("WS client died: {e}");
             let _ = status_tx.send(format!("Error de conexión: {e}"));
         }
@@ -284,7 +294,9 @@ async fn handle_unpair(
         let mut n = state.pairing_nonce.write().await;
         *n = Some((uuid::Uuid::new_v4().to_string(), std::time::Instant::now()));
     }
-    let _ = state.status_tx.send("Esperando emparejamiento...".to_string());
+    let _ = state
+        .status_tx
+        .send("Esperando emparejamiento...".to_string());
     tracing::info!("Unpaired via local HTTP; ready for re-pairing");
     Ok(Json(serde_json::json!({ "success": true })))
 }

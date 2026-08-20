@@ -332,6 +332,7 @@ fn main() -> Result<()> {
                 log_rx,
                 chat_store.clone(),
                 consent_broker_ui,
+                ws_health.clone(),
             );
             let mut w_ctx = ui_ctx.blocking_write();
             *w_ctx = Some(cc.egui_ctx.clone());
@@ -681,23 +682,26 @@ async fn background_daemon_task(
                                     let complete = match client {
                                         Ok(c) => {
                                             let flow = daemon_core::PairingFlow::new(&backend, &c);
-                                            let fp =
-                                                daemon_core::DeviceFingerprint::collect().hash_hex();
-                                            flow.complete(daemon_core::pairing::PairCompleteRequest {
-                                                code: code.clone(),
-                                                pairing_id,
-                                                device_kind: "desktop",
-                                                device_name: hostname(),
-                                                fingerprint: fp,
-                                                desired_scopes: vec![
-                                                    "desktop.shell.execute".into(),
-                                                    "desktop.fs.read".into(),
-                                                    "desktop.fs.write".into(),
-                                                    "desktop.fs.delete".into(),
-                                                    "desktop.fs.verify".into(),
-                                                    "sync.chat.push".into(),
-                                                ],
-                                            })
+                                            let fp = daemon_core::DeviceFingerprint::collect()
+                                                .hash_hex();
+                                            flow.complete(
+                                                daemon_core::pairing::PairCompleteRequest {
+                                                    code: code.clone(),
+                                                    pairing_id,
+                                                    device_kind: "desktop",
+                                                    device_name: hostname(),
+                                                    fingerprint: fp,
+                                                    desired_scopes: vec![
+                                                        "desktop.shell.execute".into(),
+                                                        "desktop.fs.read".into(),
+                                                        "desktop.fs.write".into(),
+                                                        "desktop.fs.delete".into(),
+                                                        "desktop.fs.verify".into(),
+                                                        "desktop.fs.list".into(),
+                                                        "sync.chat.push".into(),
+                                                    ],
+                                                },
+                                            )
                                             .await
                                         }
                                         Err(e) => Err(daemon_core::DaemonError::Protocol(format!(
@@ -778,7 +782,9 @@ async fn background_daemon_task(
         let mut hw = ws_handle.try_lock().expect("No lock contention at startup");
         *hw = Some(tokio::spawn(async move {
             let _ = status_tx_clone.send("Conectando al servidor...".to_string());
-            if let Err(e) = run_ws_client(ws_state, ws_backend, ws_store, ws_consent, ws_health_clone).await {
+            if let Err(e) =
+                run_ws_client(ws_state, ws_backend, ws_store, ws_consent, ws_health_clone).await
+            {
                 tracing::error!("WS client died: {e}");
                 let _ = status_tx_clone.send(format!("Error de conexión: {e}"));
             }
@@ -912,9 +918,16 @@ fn run_cli_command(cmd: &Cmd, cli: &Cli) -> Result<()> {
         Cmd::Doctor { json } => cmd_doctor(&config_dir, *json),
         Cmd::Verify { path, json } => cmd_verify(path.clone(), *json),
         Cmd::Logs { lines } => cmd_logs(&config_dir, *lines),
-        Cmd::Pair { backend, code, pairing_id } => {
-            cmd_pair(&config_dir, backend.clone(), code.clone(), pairing_id.clone())
-        }
+        Cmd::Pair {
+            backend,
+            code,
+            pairing_id,
+        } => cmd_pair(
+            &config_dir,
+            backend.clone(),
+            code.clone(),
+            pairing_id.clone(),
+        ),
         Cmd::Unpair => cmd_unpair(&config_dir),
         Cmd::Stop => cmd_stop(),
     }
@@ -987,13 +1000,22 @@ fn cmd_status(config_dir: &std::path::Path, json: bool) -> Result<()> {
         cprintln!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         cprintln!("synthhires-bridge v{version}");
-        cprintln!("  running      : {}", if remote.is_some() { "yes" } else { "no" });
+        cprintln!(
+            "  running      : {}",
+            if remote.is_some() { "yes" } else { "no" }
+        );
         cprintln!("  paired       : {}", if paired { "yes" } else { "no" });
         if let Some(id) = &state.device_id {
             cprintln!("  device_id    : {id}");
         }
-        cprintln!("  keyring token: {}", if keyring_ok { "present" } else { "missing" });
-        cprintln!("  ws connected : {}", if ws_connected { "yes" } else { "no" });
+        cprintln!(
+            "  keyring token: {}",
+            if keyring_ok { "present" } else { "missing" }
+        );
+        cprintln!(
+            "  ws connected : {}",
+            if ws_connected { "yes" } else { "no" }
+        );
         if let Some(u) = &state.backend_url {
             cprintln!("  backend      : {u}");
         }
@@ -1052,7 +1074,11 @@ fn cmd_doctor(config_dir: &std::path::Path, json: bool) -> Result<()> {
     } else {
         for (name, ok, detail) in &checks {
             let mark = if *ok { "[ok]" } else { "[FAIL]" };
-            let extra = if detail.is_empty() { String::new() } else { format!(" — {detail}") };
+            let extra = if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" — {detail}")
+            };
             cprintln!("{mark} {name}{extra}");
         }
     }
@@ -1075,7 +1101,8 @@ fn cmd_verify(path: std::path::PathBuf, json: bool) -> Result<()> {
             always_allow_paths: vec![],
         });
         let ops = daemon_core::FsOps::new(&gate);
-        ops.verify(daemon_core::fs_ops::FsVerifyRequest { path: path.clone() }).await
+        ops.verify(daemon_core::fs_ops::FsVerifyRequest { path: path.clone() })
+            .await
     });
     let verified = result.exists && result.readable && result.writable;
     if json {
@@ -1114,9 +1141,7 @@ fn cmd_logs(config_dir: &std::path::Path, lines: usize) -> Result<()> {
             let mut files: Vec<_> = entries
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("daemon")
+                    e.file_name().to_string_lossy().starts_with("daemon")
                         && e.path().extension().is_some_and(|x| x == "log")
                 })
                 .collect();
@@ -1169,6 +1194,7 @@ fn cmd_pair(
                     "desktop.fs.write".into(),
                     "desktop.fs.delete".into(),
                     "desktop.fs.verify".into(),
+                    "desktop.fs.list".into(),
                     "sync.chat.push".into(),
                 ],
             })

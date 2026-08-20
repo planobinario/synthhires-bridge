@@ -1,21 +1,16 @@
-//! WebSocket client loop.
-//!
-//! dials the backend's /api/devices/ws endpoint with the deviceToken
-//! from the OS keyring. Maintains the hello/heartbeat protocol,
-//! routes incoming action_request frames to the local capability
-//! gate + shell runner / fs ops, and ships the results back over
-//! the same WS.
-//!
-//! Reconnect strategy: exponential backoff capped at 30s, jittered
-//! to avoid thundering herd. The first hello after a reconnect
-//! triggers a `resume` frame from the server so any pending
-//! action_result the device buffered gets re-delivered.
-
 use crate::{
     capability::{CapabilityGate, GateDecision, ScopeSnapshot},
     chat_store::ChatStore,
     consent::{ConsentAnswer, ConsentBroker, ConsentPrompt},
     health::WsHealth,
+    system_ops::{
+        fetch_network, kill_process, list_processes, watch_filesystem, FsWatchRequest,
+        NetworkFetchRequest, ProcessKillRequest, ProcessListRequest,
+    },
+    task_registry::{
+        finish_global_task, record_global_task, register_global_cancellation, TaskKind, TaskState,
+        TaskStatus,
+    },
     DaemonError, Result,
 };
 use daemon_protocol::{parse_chat_push_params, BridgeFrame, HelloFrame, PROTOCOL_VERSION};
@@ -28,6 +23,11 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
 };
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct WsClient {
     backend_url: String,
@@ -36,17 +36,13 @@ pub struct WsClient {
     fingerprint: String,
     device_kind: &'static str,
     device_name: String,
-    gate: std::sync::Arc<Mutex<CapabilityGate>>,
+    gate: Arc<Mutex<CapabilityGate>>,
     chat_store: Arc<ChatStore>,
-    consent: std::sync::Arc<ConsentBroker>,
-    health: std::sync::Arc<WsHealth>,
+    consent: Arc<ConsentBroker>,
+    health: Arc<WsHealth>,
 }
 
 impl WsClient {
-    // The constructor had 7 args before the chat archive landed; adding
-    // one more tips it past clippy's default. The alternatives (builder,
-    // config struct) are churn for three call sites — keep the flat shape
-    // and document the contract instead.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend_url: impl Into<String>,
@@ -57,8 +53,8 @@ impl WsClient {
         device_name: impl Into<String>,
         gate: CapabilityGate,
         chat_store: Arc<ChatStore>,
-        consent: std::sync::Arc<ConsentBroker>,
-        health: std::sync::Arc<WsHealth>,
+        consent: Arc<ConsentBroker>,
+        health: Arc<WsHealth>,
     ) -> Self {
         Self {
             backend_url: backend_url.into(),
@@ -67,188 +63,143 @@ impl WsClient {
             fingerprint: fingerprint.into(),
             device_kind,
             device_name: device_name.into(),
-            gate: std::sync::Arc::new(Mutex::new(gate)),
+            gate: Arc::new(Mutex::new(gate)),
             chat_store,
             consent,
             health,
         }
     }
 
-    pub fn health(&self) -> std::sync::Arc<WsHealth> {
+    pub fn health(&self) -> Arc<WsHealth> {
         self.health.clone()
     }
 
-    /// Run the connection loop. Returns only on unrecoverable error
-    /// (auth failure, protocol mismatch). Network blips are absorbed
-    /// internally with exponential backoff.
     pub async fn run(&self) -> Result<()> {
         let mut backoff = Duration::from_secs(1);
         loop {
             match self.connect_once().await {
                 Ok(()) => {
-                    // Graceful close; treat as a normal reconnect.
                     self.health.mark_disconnected();
-                    tracing::info!("WS closed cleanly; reconnecting in {:?}", backoff);
                 }
-                Err(crate::DaemonError::Protocol(msg))
-                    if msg.contains("auth_failed") || msg.contains("revoked") =>
+                Err(DaemonError::Protocol(message))
+                    if message.contains("auth_failed") || message.contains("revoked") =>
                 {
-                    self.health.set_error(&msg);
+                    self.health.set_error(&message);
                     self.health.mark_disconnected();
-                    return Err(crate::DaemonError::Protocol(msg));
+                    return Err(DaemonError::Protocol(message));
                 }
-                Err(e) => {
-                    self.health.set_error(&e.to_string());
+                Err(error) => {
+                    self.health.set_error(&error.to_string());
                     self.health.mark_disconnected();
-                    tracing::warn!("WS error: {e}; reconnecting in {:?}", backoff);
+                    tracing::warn!("WS error: {error}; reconnecting in {:?}", backoff);
                 }
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
-            // Add 0-1s jitter
-            let jitter = Duration::from_millis(rand::random::<u64>() % 1000);
-            tokio::time::sleep(jitter).await;
+            tokio::time::sleep(Duration::from_millis(rand::random::<u64>() % 1000)).await;
         }
     }
 
     async fn connect_once(&self) -> Result<()> {
-        tracing::info!("Attempting WS connection to URL: {}", self.backend_url);
-        let mut req = self
+        let mut request = self
             .backend_url
             .clone()
             .into_client_request()
-            .map_err(|e| crate::DaemonError::Ws(format!("into_client_request: {e}")))?;
-        req.headers_mut().insert(
+            .map_err(|e| DaemonError::Ws(format!("into_client_request: {e}")))?;
+        request.headers_mut().insert(
             "Sec-WebSocket-Protocol",
             format!("bearer.{}", self.token).parse().map_err(
                 |e: http::header::InvalidHeaderValue| {
-                    crate::DaemonError::Ws(format!("invalid header: {e}"))
+                    DaemonError::Ws(format!("invalid header: {e}"))
                 },
             )?,
         );
-        // Defense in depth: the DO also checks this header against the
-        // token hash before accepting the socket.
         let token_hash = hex::encode(sha2::Sha256::digest(self.token.as_bytes()));
-        req.headers_mut().insert(
+        request.headers_mut().insert(
             "x-bridge-token-hash",
-            token_hash.parse().map_err(|e: http::header::InvalidHeaderValue| {
-                crate::DaemonError::Ws(format!("invalid header: {e}"))
-            })?,
+            token_hash
+                .parse()
+                .map_err(|e: http::header::InvalidHeaderValue| {
+                    DaemonError::Ws(format!("invalid header: {e}"))
+                })?,
         );
-        let (mut ws, _resp) = connect_async(req)
+        let (mut ws, _) = connect_async(request)
             .await
-            .map_err(|e| crate::DaemonError::Ws(format!("connect: {e}")))?;
-        // Send hello
+            .map_err(|e| DaemonError::Ws(format!("connect: {e}")))?;
         let hello = BridgeFrame::Hello(HelloFrame {
             v: PROTOCOL_VERSION,
             token_hash,
             fingerprint: self.fingerprint.clone(),
-            device_kind: match self.device_kind {
-                "desktop" => daemon_protocol::DeviceKind::Desktop,
-                _ => daemon_protocol::DeviceKind::Mobile,
+            device_kind: if self.device_kind == "desktop" {
+                daemon_protocol::DeviceKind::Desktop
+            } else {
+                daemon_protocol::DeviceKind::Mobile
             },
             device_name: self.device_name.clone(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
         });
         ws.send(Message::Text(serde_json::to_string(&hello)?))
             .await
-            .map_err(|e| crate::DaemonError::Ws(format!("send hello: {e}")))?;
-
-        // Read hello_ack (first frame MUST be hello_ack per protocol).
+            .map_err(|e| DaemonError::Ws(format!("send hello: {e}")))?;
         let first = ws
             .next()
             .await
-            .ok_or_else(|| crate::DaemonError::Protocol("ws closed before hello_ack".into()))?
-            .map_err(|e| crate::DaemonError::Ws(format!("recv hello_ack: {e}")))?;
-        let ack: BridgeFrame = match first {
-            Message::Text(t) => serde_json::from_str(&t)?,
-            _ => return Err(crate::DaemonError::Protocol("hello_ack not text".into())),
+            .ok_or_else(|| DaemonError::Protocol("ws closed before hello_ack".into()))?
+            .map_err(|e| DaemonError::Ws(format!("recv hello_ack: {e}")))?;
+        let frame: BridgeFrame = match first {
+            Message::Text(text) => serde_json::from_str(&text)?,
+            _ => return Err(DaemonError::Protocol("hello_ack not text".into())),
         };
-        let ack = match ack {
-            BridgeFrame::HelloAck(ack) => ack,
-            BridgeFrame::Error(e) => {
-                self.health.set_error(&format!("{}: {}", e.code, e.message));
-                return Err(crate::DaemonError::Protocol(format!(
+        let ack = match frame {
+            BridgeFrame::HelloAck(value) => value,
+            BridgeFrame::Error(error) => {
+                return Err(DaemonError::Protocol(format!(
                     "{}: {}",
-                    e.code, e.message
-                )));
+                    error.code, error.message
+                )))
             }
-            _ => return Err(crate::DaemonError::Protocol("expected hello_ack".into())),
+            _ => return Err(DaemonError::Protocol("expected hello_ack".into())),
         };
         self.health.mark_connected();
-        // Update scope cache
-        let mut g = self.gate.lock().await;
-        let scopes = ScopeSnapshot::from(&ack.scopes);
-        *g = CapabilityGate::new(scopes);
-        drop(g);
-
-        // Loop: heartbeat every 30s, dispatch incoming actions.
-        let mut heartbeat = tokio::time::interval(Duration::from_millis(30_000));
+        *self.gate.lock().await = CapabilityGate::new(ScopeSnapshot::from(&ack.scopes));
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
         loop {
             tokio::select! {
-                Some(msg) = ws.next() => {
-                    let msg = match msg {
-                        Ok(m) => m,
-                        Err(e) => return Err(crate::DaemonError::Ws(format!("recv: {e}"))),
-                    };
-                    match msg {
-                        Message::Text(t) => {
-                            let frame: BridgeFrame = serde_json::from_str(&t)?;
-                            if let BridgeFrame::HeartbeatAck(ref ack) = frame {
-                                self.health.mark_heartbeat_ack(ack.t);
-                            }
+                Some(message) = ws.next() => {
+                    match message.map_err(|e| DaemonError::Ws(format!("recv: {e}")))? {
+                        Message::Text(text) => {
+                            let frame: BridgeFrame = serde_json::from_str(&text)?;
+                            if let BridgeFrame::HeartbeatAck(ref ack) = frame { self.health.mark_heartbeat_ack(ack.t); }
                             self.handle_frame(&mut ws, frame).await?;
                         }
-                        Message::Close(c) => {
-                            tracing::info!("server closed ws: {:?}", c);
-                            return Ok(());
-                        }
+                        Message::Close(_) => return Ok(()),
                         _ => {}
                     }
                 }
                 _ = heartbeat.tick() => {
-                    let ping = BridgeFrame::Heartbeat(daemon_protocol::HeartbeatFrame {
-                        v: PROTOCOL_VERSION,
-                        t: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                    });
-                    ws.send(Message::Text(serde_json::to_string(&ping)?)).await
-                        .map_err(|e| crate::DaemonError::Ws(format!("send heartbeat: {e}")))?;
+                    let frame = BridgeFrame::Heartbeat(daemon_protocol::HeartbeatFrame { v: PROTOCOL_VERSION, t: now_ms() });
+                    ws.send(Message::Text(serde_json::to_string(&frame)?)).await
+                        .map_err(|e| DaemonError::Ws(format!("send heartbeat: {e}")))?;
                 }
             }
         }
     }
 
-    async fn handle_frame(
-        &self,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        frame: BridgeFrame,
-    ) -> Result<()> {
+    async fn handle_frame(&self, ws: &mut WsStream, frame: BridgeFrame) -> Result<()> {
         match frame {
-            BridgeFrame::ActionRequest(req) => {
-                if req.capability == "sync.chat.push" {
-                    self.handle_chat_push(ws, req).await
-                } else {
-                    self.handle_action(ws, req).await
-                }
+            BridgeFrame::ActionRequest(request) if request.capability == "sync.chat.push" => {
+                self.handle_chat_push(ws, request).await
             }
-            BridgeFrame::ScopeUpdate(upd) => {
-                let mut g = self.gate.lock().await;
-                let snap = ScopeSnapshot::from(&upd.scopes);
-                *g = CapabilityGate::new(snap);
-                tracing::info!("scope updated by server");
+            BridgeFrame::ActionRequest(request) => self.handle_action(ws, request).await,
+            BridgeFrame::ScopeUpdate(update) => {
+                *self.gate.lock().await = CapabilityGate::new(ScopeSnapshot::from(&update.scopes));
                 Ok(())
             }
-            BridgeFrame::Revoke(rev) => {
-                tracing::warn!("revoked by server: {}", rev.reason);
-                Err(crate::DaemonError::Protocol("revoked".into()))
-            }
-            BridgeFrame::Error(e) => {
-                tracing::error!("server error: {}: {}", e.code, e.message);
+            BridgeFrame::Revoke(_) => Err(DaemonError::Protocol("revoked".into())),
+            BridgeFrame::Error(error) => {
+                tracing::error!("server error: {}: {}", error.code, error.message);
                 Ok(())
             }
             _ => Ok(()),
@@ -257,738 +208,557 @@ impl WsClient {
 
     async fn handle_action(
         &self,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        req: daemon_protocol::ActionRequestFrame,
+        ws: &mut WsStream,
+        request: daemon_protocol::ActionRequestFrame,
     ) -> Result<()> {
-        // 1. Audit Log (Local inmutable record)
-        let config_dir = directories::ProjectDirs::from("com", "synthhires", "bridge")
-            .map(|d| d.config_dir().to_path_buf())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                    .join("synthhires-bridge")
-            });
-        let audit_log_path = config_dir.join("audit.log");
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let params_str = serde_json::to_string(&req.params).unwrap_or_default();
-        let log_entry = format!(
-            "[{}] CAPABILITY: {} PARAMS: {}\n",
-            timestamp, req.capability, params_str
-        );
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&audit_log_path)
-        {
-            use std::io::Write;
-            let _ = file.write_all(log_entry.as_bytes());
+        self.register_task(&request);
+        self.audit(&request);
+        if !self.gate.lock().await.allows(&request.capability) {
+            return self
+                .send_error(
+                    ws,
+                    request.id,
+                    format!("capability not granted: {}", request.capability),
+                )
+                .await;
         }
-
-        // 2. Capability Gate Check
-        let g = self.gate.lock().await;
-        let allowed = g.allows(&req.capability);
-        drop(g);
-        if !allowed {
-            let result = daemon_protocol::ActionResultFrame {
-                v: PROTOCOL_VERSION,
-                id: req.id,
-                ok: false,
-                output: None,
-                error: Some(daemon_protocol::ActionError {
-                    code: "capability_not_granted".into(),
-                    message: format!(
-                        "La capability '{}' no está concedida a este dispositivo.",
-                        req.capability
-                    ),
-                }),
-                duration_ms: 0,
-            };
-            ws.send(Message::Text(serde_json::to_string(
-                &BridgeFrame::ActionResult(result),
-            )?))
-            .await?;
-            return Ok(());
-        }
-
-        // 3. Hard-Stops for Destructive Commands (DPI)
-        if req.capability == "desktop.shell.execute" {
-            let cmd = req
+        if request.capability == "desktop.shell.execute" {
+            let command = request
                 .params
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let dangerous_patterns = [
-                "sudo ",
-                "rm -rf",
-                "del /f /s /q",
-                "mkfs",
-                "chmod -R 777",
-                "chown -R",
-            ];
-            for pattern in dangerous_patterns {
-                if cmd.contains(pattern) {
-                    tracing::error!("Hard-stop triggered for dangerous command: {}", cmd);
-                    let result = daemon_protocol::ActionResultFrame {
-                        v: PROTOCOL_VERSION,
-                        id: req.id,
-                        ok: false,
-                        output: None,
-                        error: Some(daemon_protocol::ActionError {
-                            code: "hard_stop_blocked".into(),
-                            message: format!("El comando contiene patrones destructivos prohibidos por seguridad ('{}').", pattern),
-                        }),
-                        duration_ms: 0,
-                    };
-                    ws.send(Message::Text(serde_json::to_string(
-                        &BridgeFrame::ActionResult(result),
-                    )?))
-                    .await?;
-                    return Ok(());
-                }
+            if contains_dangerous_shell(command) {
+                return self
+                    .send_error(
+                        ws,
+                        request.id,
+                        "hard_stop_blocked: dangerous command pattern".into(),
+                    )
+                    .await;
             }
-
-            // Consent: skip only when the server explicitly trusts the
-            // action (alwaysAllowPaths configured in the web device
-            // panel). Everything else raises a native prompt through the
-            // ConsentBroker — the daemon NEVER silently executes
-            // arbitrary shell commands on the user's machine, and never
-            // silently refuses them either.
-            if !req.skip_consent_prompt {
-                let target = req
-                    .params
-                    .get("path")
-                    .or_else(|| req.params.get("cwd"))
-                    .and_then(|v| v.as_str());
-                let prompt = ConsentPrompt {
-                    action_id: req.id.clone(),
-                    capability: req.capability.clone(),
-                    summary: cmd.to_string(),
-                    path: target.map(|p| p.to_string()),
-                };
-                let mut rx = self.consent.ask(prompt);
-                let answer = tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    &mut rx,
-                )
-                .await;
-                let answer: ConsentAnswer = match answer {
-                    Ok(Ok(a)) => a,
-                    Ok(Err(_)) | Err(_) => ConsentAnswer::default(), // no answer = deny
-                };
-                if !answer.approved {
-                    let result = daemon_protocol::ActionResultFrame {
-                        v: PROTOCOL_VERSION,
-                        id: req.id,
-                        ok: false,
-                        output: None,
-                        error: Some(daemon_protocol::ActionError {
-                            code: "consent_denied".into(),
-                            message: "El usuario denegó el consentimiento para esta acción.".into(),
-                        }),
-                        duration_ms: 0,
-                    };
-                    ws.send(Message::Text(serde_json::to_string(
-                        &BridgeFrame::ActionResult(result),
-                    )?))
-                    .await?;
-                    return Ok(());
-                }
-                // Approved. If the user chose "always allow", persist the
-                // path into the gate snapshot so future actions on it skip
-                // the prompt.
-                if answer.remember {
-                    if let Some(path) = target {
-                        let mut g = self.gate.lock().await;
-                        let augmented = g.with_additional_path(std::path::PathBuf::from(path));
-                        *g = augmented;
-                    }
-                }
+            if !request.skip_consent_prompt
+                && !self
+                    .await_consent(&request, command.to_string(), None)
+                    .await
+            {
+                return self
+                    .send_error(ws, request.id, "consent_denied".into())
+                    .await;
             }
         }
+        if request.capability == "desktop.process.kill"
+            && !self
+                .await_consent(&request, "Terminar un proceso del sistema".into(), None)
+                .await
+        {
+            return self
+                .send_error(ws, request.id, "consent_denied".into())
+                .await;
+        }
 
-        // 4. REAL execution. The previous scaffold ACKed with ok:true
-        //    without doing anything — the web agent reported success
-        //    while the user's file was never touched. That lie is the
-        //    entire bug this module now refuses to reproduce.
         let started = std::time::Instant::now();
-        match req.capability.as_str() {
+        match request.capability.as_str() {
             "desktop.fs.read" => {
-                let parse: Result<crate::fs_ops::FsReadRequest> =
-                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
-                match parse {
-                    Ok(fs_req) => {
-                        // If the path is outside alwaysAllow, prompt once
-                        // for consent before touching the file. Approval
-                        // augments the gate for THIS operation only (unless
-                        // the user checked "remember", which persists).
-                        let gate_decision = {
-                            let g = self.gate.lock().await;
-                            g.check_path("desktop.fs.read", &fs_req.path)
-                        };
-                        let effective_gate = match gate_decision {
-                            GateDecision::Allow => self.gate.lock().await.clone(),
-                            GateDecision::Deny => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some("consent_denied".into()),
-                                    0,
-                                )
-                                .await?;
-                                return Ok(());
-                            }
-                            GateDecision::RequireConsent => {
-                                if !self.await_path_consent(&req, &fs_req.path).await {
-                                    self.send_action_result(
-                                        ws,
-                                        req.id,
-                                        false,
-                                        None,
-                                        Some("consent_denied".into()),
-                                        0,
-                                    )
-                                    .await?;
-                                    return Ok(());
-                                }
-                                self.gate
-                                    .lock()
-                                    .await
-                                    .with_additional_path(fs_req.path.clone())
-                            }
-                        };
-                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
-                        match ops.read(fs_req).await {
-                            Ok(res) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    true,
-                                    Some(serde_json::json!({
-                                        "content_base64": res.content_base64,
-                                        "size": res.size,
-                                    })),
-                                    None,
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await?;
-                            }
-                            Err(e) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some(e.to_string()),
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            false,
-                            None,
-                            Some(format!("bad params: {e}")),
-                            0,
-                        )
-                        .await?;
-                    }
+                let parsed =
+                    serde_json::from_value::<crate::fs_ops::FsReadRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match self.path_gate(&request, "desktop.fs.read", &value.path).await {
+                        Ok(gate) => match crate::fs_ops::FsOps::new(&gate).read(value).await {
+                            Ok(result) => self.send_action_result(ws, request.id, true, Some(serde_json::json!({"content_base64": result.content_base64, "size": result.size})), None, elapsed_ms(started)).await,
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                        },
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => self.send_error(ws, request.id, format!("bad params: {error}")).await,
                 }
             }
             "desktop.fs.write" => {
-                let parse: Result<crate::fs_ops::FsWriteRequest> =
-                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
-                match parse {
-                    Ok(fs_req) => {
-                        let gate_decision = {
-                            let g = self.gate.lock().await;
-                            g.check_path("desktop.fs.write", &fs_req.path)
-                        };
-                        let effective_gate = match gate_decision {
-                            GateDecision::Allow => self.gate.lock().await.clone(),
-                            GateDecision::Deny => {
+                let parsed =
+                    serde_json::from_value::<crate::fs_ops::FsWriteRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match self.path_gate(&request, "desktop.fs.write", &value.path).await {
+                        Ok(gate) => match crate::fs_ops::FsOps::new(&gate).write(value).await {
+                            Ok(result) => self.send_action_result(ws, request.id, result.verified, Some(serde_json::json!({"bytes_written": result.bytes_written, "verified": result.verified})), (!result.verified).then_some("write read-back verification failed".into()), elapsed_ms(started)).await,
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                        },
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => self.send_error(ws, request.id, format!("bad params: {error}")).await,
+                }
+            }
+            "desktop.fs.delete" => {
+                let parsed = serde_json::from_value::<crate::fs_ops::FsDeleteRequest>(
+                    request.params.clone(),
+                );
+                match parsed {
+                    Ok(value) => match self
+                        .path_gate(&request, "desktop.fs.delete", &value.path)
+                        .await
+                    {
+                        Ok(gate) => match crate::fs_ops::FsOps::new(&gate).delete(value).await {
+                            Ok(()) => {
                                 self.send_action_result(
                                     ws,
-                                    req.id,
-                                    false,
+                                    request.id,
+                                    true,
+                                    Some(serde_json::json!({"deleted": true})),
                                     None,
-                                    Some("consent_denied".into()),
-                                    0,
+                                    elapsed_ms(started),
                                 )
-                                .await?;
-                                return Ok(());
+                                .await
                             }
-                            GateDecision::RequireConsent => {
-                                if !self.await_path_consent(&req, &fs_req.path).await {
-                                    self.send_action_result(
-                                        ws,
-                                        req.id,
-                                        false,
-                                        None,
-                                        Some("consent_denied".into()),
-                                        0,
-                                    )
-                                    .await?;
-                                    return Ok(());
-                                }
-                                self.gate
-                                    .lock()
-                                    .await
-                                    .with_additional_path(fs_req.path.clone())
-                            }
-                        };
-                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
-                        match ops.write(fs_req).await {
-                            Ok(res) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    res.verified,
-                                    Some(serde_json::json!({
-                                        "bytes_written": res.bytes_written,
-                                        "verified": res.verified,
-                                    })),
-                                    if res.verified {
-                                        None
-                                    } else {
-                                        Some("write completed but read-back verification FAILED — file content mismatch".into())
-                                    },
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await?;
-                            }
-                            Err(e) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some(e.to_string()),
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            false,
-                            None,
-                            Some(format!("bad params: {e}")),
-                            0,
-                        )
-                        .await?;
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                        },
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
                     }
                 }
             }
             "desktop.fs.verify" => {
-                // Verification is how the web UI decides whether to attach
-                // a workspace — the path is NOT yet in alwaysAllowPaths, so
-                // it must NOT go through gate_for_path (that would always
-                // reject). The capability grant alone is the gate here; the
-                // probe touches nothing but a unique temp file.
-                let parse: Result<crate::fs_ops::FsVerifyRequest> =
-                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
-                match parse {
-                    Ok(fs_req) => {
-                        let g = self.gate.lock().await;
-                        let ops = crate::fs_ops::FsOps::new(&g);
-                        let res = ops.verify(fs_req).await;
-                        drop(g);
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            res.exists && res.readable && res.writable,
-                            Some(serde_json::json!({
-                                "exists": res.exists,
-                                "is_dir": res.is_dir,
-                                "readable": res.readable,
-                                "writable": res.writable,
-                            })),
-                            res.error,
-                            started.elapsed().as_millis() as u64,
-                        )
-                        .await?;
+                let parsed = serde_json::from_value::<crate::fs_ops::FsVerifyRequest>(
+                    request.params.clone(),
+                );
+                match parsed {
+                    Ok(value) => {
+                        let gate = self.gate.lock().await.clone();
+                        let result = crate::fs_ops::FsOps::new(&gate).verify(value).await;
+                        self.send_action_result(ws, request.id, result.exists && result.readable && result.writable, Some(serde_json::json!({"exists": result.exists, "is_dir": result.is_dir, "readable": result.readable, "writable": result.writable})), result.error, elapsed_ms(started)).await
                     }
-                    Err(e) => {
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            false,
-                            None,
-                            Some(format!("bad params: {e}")),
-                            0,
-                        )
-                        .await?;
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
                     }
                 }
             }
-            "desktop.fs.delete" => {
-                let parse: Result<crate::fs_ops::FsDeleteRequest> =
-                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
-                match parse {
-                    Ok(fs_req) => {
-                        let gate_decision = {
-                            let g = self.gate.lock().await;
-                            g.check_path("desktop.fs.delete", &fs_req.path)
-                        };
-                        let effective_gate = match gate_decision {
-                            GateDecision::Allow => self.gate.lock().await.clone(),
-                            GateDecision::Deny => {
+            "desktop.fs.list" => {
+                let parsed =
+                    serde_json::from_value::<crate::fs_ops::FsListRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => {
+                        let gate = self.gate.lock().await.clone();
+                        match crate::fs_ops::FsOps::new(&gate).list(value).await {
+                            Ok(result) => {
                                 self.send_action_result(
                                     ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some("consent_denied".into()),
-                                    0,
-                                )
-                                .await?;
-                                return Ok(());
-                            }
-                            GateDecision::RequireConsent => {
-                                if !self.await_path_consent(&req, &fs_req.path).await {
-                                    self.send_action_result(
-                                        ws,
-                                        req.id,
-                                        false,
-                                        None,
-                                        Some("consent_denied".into()),
-                                        0,
-                                    )
-                                    .await?;
-                                    return Ok(());
-                                }
-                                self.gate
-                                    .lock()
-                                    .await
-                                    .with_additional_path(fs_req.path.clone())
-                            }
-                        };
-                        let ops = crate::fs_ops::FsOps::new(&effective_gate);
-                        match ops.delete(fs_req).await {
-                            Ok(()) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
+                                    request.id,
                                     true,
-                                    Some(serde_json::json!({ "deleted": true })),
+                                    Some(serde_json::to_value(result)?),
                                     None,
-                                    started.elapsed().as_millis() as u64,
+                                    elapsed_ms(started),
                                 )
-                                .await?;
+                                .await
                             }
-                            Err(e) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some(e.to_string()),
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await?;
-                            }
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
                         }
                     }
-                    Err(e) => {
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            false,
-                            None,
-                            Some(format!("bad params: {e}")),
-                            0,
-                        )
-                        .await?;
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
+                    }
+                }
+            }
+            "desktop.fs.watch" => {
+                let parsed = serde_json::from_value::<FsWatchRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match self
+                        .path_gate(&request, "desktop.fs.watch", &value.path)
+                        .await
+                    {
+                        Ok(_) => match watch_filesystem(value).await {
+                            Ok(result) => {
+                                self.send_action_result(
+                                    ws,
+                                    request.id,
+                                    true,
+                                    Some(serde_json::to_value(result)?),
+                                    None,
+                                    elapsed_ms(started),
+                                )
+                                .await
+                            }
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                        },
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
+                    }
+                }
+            }
+            "desktop.process.list" => {
+                let parsed = serde_json::from_value::<ProcessListRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match list_processes(value).await {
+                        Ok(result) => {
+                            self.send_action_result(
+                                ws,
+                                request.id,
+                                true,
+                                Some(serde_json::to_value(result)?),
+                                None,
+                                elapsed_ms(started),
+                            )
+                            .await
+                        }
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
+                    }
+                }
+            }
+            "desktop.process.kill" => {
+                let parsed = serde_json::from_value::<ProcessKillRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match kill_process(value).await {
+                        Ok(result) => {
+                            self.send_action_result(
+                                ws,
+                                request.id,
+                                true,
+                                Some(serde_json::to_value(result)?),
+                                None,
+                                elapsed_ms(started),
+                            )
+                            .await
+                        }
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
+                    }
+                }
+            }
+            "desktop.network.fetch" => {
+                let parsed = serde_json::from_value::<NetworkFetchRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => match fetch_network(value).await {
+                        Ok(result) => {
+                            self.send_action_result(
+                                ws,
+                                request.id,
+                                true,
+                                Some(serde_json::to_value(result)?),
+                                None,
+                                elapsed_ms(started),
+                            )
+                            .await
+                        }
+                        Err(error) => self.send_error(ws, request.id, error.to_string()).await,
+                    },
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
                     }
                 }
             }
             "desktop.shell.execute" => {
-                let parse: Result<crate::shell::ShellRequest> =
-                    serde_json::from_value(req.params.clone()).map_err(DaemonError::Json);
-                match parse {
-                    Ok(shell_req) => {
-                        // Isolated scope: the runner borrows the gate guard;
-                        // both must be dropped before the streaming loop.
-                        let run_result = {
-                            let g = self.gate.lock().await;
-                            let runner = crate::shell::ShellRunner::new(&g);
-                            runner.run(shell_req).await
+                let parsed =
+                    serde_json::from_value::<crate::shell::ShellRequest>(request.params.clone());
+                match parsed {
+                    Ok(value) => {
+                        let cancellation = CancellationToken::new();
+                        if let Ok(action_id) = Uuid::parse_str(&request.id) {
+                            register_global_cancellation(action_id, cancellation.clone());
+                        }
+                        let run = {
+                            let gate = self.gate.lock().await;
+                            crate::shell::ShellRunner::new(&gate)
+                                .run(value, cancellation)
+                                .await
                         };
-                        match run_result {
-                            Ok((mut rx, future)) => {
-                                // The future owns the channel's last `tx`
-                                // (dropped inside await_result). Run it
-                                // concurrently so the drain loop below can
-                                // terminate — awaiting it after the loop
-                                // would deadlock (recv() never returns None
-                                // while the future holds a sender).
+                        match run {
+                            Ok((mut receiver, future)) => {
                                 let handle =
                                     tokio::spawn(async move { future.await_result().await });
-                                let mut seq = 0u64;
-                                let action_id_stream = req.id.clone();
-                                while let Some(chunk) = rx.recv().await {
-                                    let frame = daemon_protocol::ActionStreamFrame {
+                                let mut seq = 0;
+                                while let Some(chunk) = receiver.recv().await {
+                                    let stream = daemon_protocol::ActionStreamFrame {
                                         v: PROTOCOL_VERSION,
-                                        id: action_id_stream.clone(),
+                                        id: request.id.clone(),
                                         seq,
-                                        channel: match chunk.channel {
-                                            "stdout" => daemon_protocol::StreamChannel::Stdout,
-                                            _ => daemon_protocol::StreamChannel::Stderr,
+                                        channel: if chunk.channel == "stdout" {
+                                            daemon_protocol::StreamChannel::Stdout
+                                        } else {
+                                            daemon_protocol::StreamChannel::Stderr
                                         },
                                         data: chunk.data,
                                         eof: false,
                                     };
                                     ws.send(Message::Text(serde_json::to_string(
-                                        &BridgeFrame::ActionStream(frame),
+                                        &BridgeFrame::ActionStream(stream),
                                     )?))
                                     .await?;
                                     seq += 1;
                                 }
                                 match handle.await {
-                                    Ok(Ok(res)) => {
-                                        let ok = res.exit_code == Some(0);
-                                        self.send_action_result(
-                                            ws,
-                                            req.id,
-                                            ok,
-                                            Some(serde_json::json!({
-                                                "exit_code": res.exit_code,
-                                                "stdout": res.stdout,
-                                                "stderr": res.stderr,
-                                            })),
-                                            if ok {
-                                                None
-                                            } else {
-                                                Some(format!("exit code {:?}", res.exit_code))
-                                            },
-                                            res.duration_ms,
-                                        )
-                                        .await?;
+                                    Ok(Ok(result)) => {
+                                        let ok = result.exit_code == Some(0);
+                                        self.send_action_result(ws, request.id, ok, Some(serde_json::json!({"exit_code": result.exit_code, "stdout": result.stdout, "stderr": result.stderr})), (!ok).then_some(format!("exit code {:?}", result.exit_code)), result.duration_ms).await
                                     }
-                                    Ok(Err(e)) => {
+                                    Ok(Err(DaemonError::Cancelled)) => {
                                         self.send_action_result(
                                             ws,
-                                            req.id,
+                                            request.id,
                                             false,
                                             None,
-                                            Some(e.to_string()),
-                                            started.elapsed().as_millis() as u64,
+                                            Some("action_cancelled".into()),
+                                            elapsed_ms(started),
                                         )
-                                        .await?;
+                                        .await
                                     }
-                                    Err(e) => {
-                                        self.send_action_result(
+                                    Ok(Err(error)) => {
+                                        self.send_error(ws, request.id, error.to_string()).await
+                                    }
+                                    Err(error) => {
+                                        self.send_error(
                                             ws,
-                                            req.id,
-                                            false,
-                                            None,
-                                            Some(format!("shell task failed: {e}")),
-                                            started.elapsed().as_millis() as u64,
+                                            request.id,
+                                            format!("shell task failed: {error}"),
                                         )
-                                        .await?;
+                                        .await
                                     }
                                 }
                             }
-                            Err(e) => {
-                                self.send_action_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    None,
-                                    Some(e.to_string()),
-                                    0,
-                                )
-                                .await?;
-                            }
+                            Err(error) => self.send_error(ws, request.id, error.to_string()).await,
                         }
                     }
-                    Err(e) => {
-                        self.send_action_result(
-                            ws,
-                            req.id,
-                            false,
-                            None,
-                            Some(format!("bad params: {e}")),
-                            0,
-                        )
-                        .await?;
+                    Err(error) => {
+                        self.send_error(ws, request.id, format!("bad params: {error}"))
+                            .await
                     }
                 }
             }
             other => {
-                self.send_action_result(
+                self.send_error(
                     ws,
-                    req.id,
-                    false,
-                    None,
-                    Some(format!("Capability not implemented in daemon: {other}")),
-                    0,
+                    request.id,
+                    format!("capability not implemented in daemon: {other}"),
                 )
-                .await?;
+                .await
             }
         }
-        Ok(())
     }
 
-    /// Ask the user for consent to touch a path outside alwaysAllow.
-    /// Returns true on approval (and persists the path when "remember"
-    /// was checked), false on denial/timeout.
+    fn register_task(&self, request: &daemon_protocol::ActionRequestFrame) {
+        let Ok(id) = Uuid::parse_str(&request.id) else {
+            return;
+        };
+        record_global_task(TaskState {
+            id,
+            kind: task_kind(&request.capability),
+            description: format!("{} · {}", request.capability, request.id),
+            status: TaskStatus::Running,
+            started_at_instant: std::time::Instant::now(),
+            started_at_utc: chrono::Utc::now(),
+            finished_at: None,
+        });
+    }
+
+    async fn path_gate(
+        &self,
+        request: &daemon_protocol::ActionRequestFrame,
+        capability: &str,
+        path: &std::path::Path,
+    ) -> Result<CapabilityGate> {
+        match self.gate.lock().await.check_path(capability, path) {
+            GateDecision::Allow => Ok(self.gate.lock().await.clone()),
+            GateDecision::Deny => Err(DaemonError::CapabilityDenied(capability.into())),
+            GateDecision::RequireConsent => {
+                if !self.await_path_consent(request, path).await {
+                    return Err(DaemonError::UserDenied);
+                }
+                Ok(self
+                    .gate
+                    .lock()
+                    .await
+                    .with_additional_path(path.to_path_buf()))
+            }
+        }
+    }
+
     async fn await_path_consent(
         &self,
-        req: &daemon_protocol::ActionRequestFrame,
+        request: &daemon_protocol::ActionRequestFrame,
         path: &std::path::Path,
     ) -> bool {
-        let prompt = ConsentPrompt {
-            action_id: req.id.clone(),
-            capability: req.capability.clone(),
-            summary: format!(
-                "{} en {}",
-                req.capability,
-                path.display()
-            ),
-            path: Some(path.display().to_string()),
-        };
-        let mut rx = self.consent.ask(prompt);
-        let answer = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            &mut rx,
+        self.await_consent(
+            request,
+            format!("{} en {}", request.capability, path.display()),
+            Some(path.display().to_string()),
         )
-        .await;
-        let answer: ConsentAnswer = match answer {
-            Ok(Ok(a)) => a,
+        .await
+    }
+
+    async fn await_consent(
+        &self,
+        request: &daemon_protocol::ActionRequestFrame,
+        summary: String,
+        path: Option<String>,
+    ) -> bool {
+        let prompt = ConsentPrompt {
+            action_id: request.id.clone(),
+            capability: request.capability.clone(),
+            summary,
+            path: path.clone(),
+        };
+        let mut receiver = self.consent.ask(prompt);
+        let answer = tokio::time::timeout(Duration::from_secs(120), &mut receiver).await;
+        let answer = match answer {
+            Ok(Ok(value)) => value,
             Ok(Err(_)) | Err(_) => ConsentAnswer::default(),
         };
         if answer.approved && answer.remember {
-            let mut g = self.gate.lock().await;
-            *g = g.with_additional_path(path.to_path_buf());
+            if let Some(path) = path {
+                let mut gate = self.gate.lock().await;
+                *gate = gate.with_additional_path(path.into());
+            }
         }
         answer.approved
     }
 
+    async fn send_error(&self, ws: &mut WsStream, action_id: String, error: String) -> Result<()> {
+        self.send_action_result(ws, action_id, false, None, Some(error), 0)
+            .await
+    }
+
     async fn send_action_result(
         &self,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
+        ws: &mut WsStream,
         action_id: String,
         ok: bool,
         output: Option<serde_json::Value>,
         error: Option<String>,
         duration_ms: u64,
     ) -> Result<()> {
-        let result = daemon_protocol::ActionResultFrame {
+        if let Ok(id) = Uuid::parse_str(&action_id) {
+            let status = if ok {
+                TaskStatus::Completed(None)
+            } else if error.as_deref() == Some("action_cancelled") {
+                TaskStatus::Killed
+            } else {
+                TaskStatus::Failed(error.clone().unwrap_or_else(|| "action_failed".into()))
+            };
+            finish_global_task(id, status);
+        }
+        let frame = daemon_protocol::ActionResultFrame {
             v: PROTOCOL_VERSION,
             id: action_id,
             ok,
             output,
-            error: error.map(|e| daemon_protocol::ActionError {
-                code: "action_failed".into(),
-                message: e,
+            error: error.map(|message| daemon_protocol::ActionError {
+                code: if message == "action_cancelled" {
+                    "action_cancelled".into()
+                } else {
+                    "action_failed".into()
+                },
+                message,
             }),
             duration_ms,
         };
         ws.send(Message::Text(serde_json::to_string(
-            &BridgeFrame::ActionResult(result),
+            &BridgeFrame::ActionResult(frame),
         )?))
         .await?;
         Ok(())
     }
 
-    /// `sync.chat.push` — the server sends conversation snapshots so
-    /// the desktop daemon keeps a durable local archive (SQLite in
-    /// the user's config dir). This is the only chat-sync capability
-    /// in this version; reads/export happen in the daemon UI only.
+    fn audit(&self, request: &daemon_protocol::ActionRequestFrame) {
+        let config_dir = directories::ProjectDirs::from("com", "synthhires", "bridge")
+            .map(|d| d.config_dir().to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from(".").join("synthhires-bridge"));
+        let _ = std::fs::create_dir_all(&config_dir);
+        let params = serde_json::to_string(&request.params).unwrap_or_default();
+        let line = format!(
+            "[{}] CAPABILITY: {} PARAMS: {}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            request.capability,
+            params
+        );
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(config_dir.join("audit.log"))
+        {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+
     async fn handle_chat_push(
         &self,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        req: daemon_protocol::ActionRequestFrame,
+        ws: &mut WsStream,
+        request: daemon_protocol::ActionRequestFrame,
     ) -> Result<()> {
+        self.register_task(&request);
+        if !self.gate.lock().await.allows("sync.chat.push") {
+            return self
+                .send_error(
+                    ws,
+                    request.id,
+                    "capability not granted: sync.chat.push".into(),
+                )
+                .await;
+        }
         let started = std::time::Instant::now();
-        let (ok, error) = match parse_chat_push_params(&req.params) {
-            Ok(convs) => {
+        let (ok, error) = match parse_chat_push_params(&request.params) {
+            Ok(conversations) => {
                 let mut saved = 0usize;
-                for conv in &convs {
-                    match self.chat_store.upsert_conversation(conv) {
-                        Ok(n) => saved += n,
-                        Err(e) => {
-                            tracing::error!("[chat-sync] upsert {} failed: {e}", conv.id);
-                            return self
-                                .send_chat_push_result(
-                                    ws,
-                                    req.id,
-                                    false,
-                                    format!("store_error: {e}"),
-                                    started.elapsed().as_millis() as u64,
-                                )
-                                .await;
-                        }
-                    }
+                for conversation in &conversations {
+                    saved += self
+                        .chat_store
+                        .upsert_conversation(conversation)
+                        .map_err(|e| DaemonError::Protocol(format!("store_error: {e}")))?;
                 }
                 tracing::info!(
                     "[chat-sync] pushed {} conversations, {} messages saved",
-                    convs.len(),
+                    conversations.len(),
                     saved
                 );
                 (true, None)
             }
-            Err(e) => {
-                tracing::warn!("[chat-sync] malformed push: {e}");
-                (false, Some(format!("bad_params: {e}")))
-            }
+            Err(error) => (false, Some(format!("bad_params: {error}"))),
         };
-
-        self.send_chat_push_result(
-            ws,
-            req.id,
-            ok,
-            error.unwrap_or_default(),
-            started.elapsed().as_millis() as u64,
-        )
-        .await
+        self.send_action_result(ws, request.id, ok, None, error, elapsed_ms(started))
+            .await
     }
+}
 
-    async fn send_chat_push_result(
-        &self,
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        action_id: String,
-        ok: bool,
-        error: String,
-        duration_ms: u64,
-    ) -> Result<()> {
-        let result = daemon_protocol::ActionResultFrame {
-            v: PROTOCOL_VERSION,
-            id: action_id,
-            ok,
-            output: None,
-            error: if error.is_empty() {
-                None
-            } else {
-                Some(daemon_protocol::ActionError {
-                    code: "chat_sync_failed".into(),
-                    message: error,
-                })
-            },
-            duration_ms,
-        };
-        ws.send(Message::Text(serde_json::to_string(
-            &BridgeFrame::ActionResult(result),
-        )?))
-        .await?;
-        Ok(())
+fn task_kind(capability: &str) -> TaskKind {
+    match capability {
+        "desktop.shell.execute" => TaskKind::ShellExec,
+        "desktop.fs.read" => TaskKind::FileRead,
+        "desktop.fs.write" | "desktop.fs.delete" => TaskKind::FileWrite,
+        "sync.chat.push" => TaskKind::DbProxy,
+        other => TaskKind::Other(other.to_string()),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis() as u64
+}
+fn contains_dangerous_shell(command: &str) -> bool {
+    [
+        "sudo ",
+        "rm -rf",
+        "del /f /s /q",
+        "mkfs",
+        "chmod -R 777",
+        "chown -R",
+    ]
+    .iter()
+    .any(|pattern| command.contains(pattern))
 }

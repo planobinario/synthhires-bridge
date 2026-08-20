@@ -2,20 +2,11 @@
 //!
 //! Modules:
 //!   • `capability` — local enforcement of the device's granted scope.
-//!                     Defense in depth: even if the server is
-//!                     compromised, the daemon refuses actions not in
-//!                     the cached scopes.
-//!   • `shell`      — executes commands with isolated args via
-//!                     `std::process::Command` (NEVER string concat
-//!                     into `sh -c "..."`).
-//!   • `fs`         — read/write/delete with prefix-match allow-list.
-//!   • `keyring`    — OS secure storage wrapper (Windows Credential
-//!                     Manager / macOS Keychain / Linux Secret Service).
-//!   • `fingerprint` — host + OS + machine-id hash, recomputed on
-//!                     each hello so a moved disk doesn't masquerade.
-//!   • `audit`      — encrypted local audit log. The server already
-//!                     keeps an authoritative copy; this is for the
-//!                     user to inspect offline and for forenscis.
+//!   • `shell`      — executes commands with native process boundaries.
+//!   • `fs_ops`     — read/write/delete/list/verify with allow-list checks.
+//!   • `system_ops` — bounded process, HTTP, and filesystem-watch actions.
+//!   • `keyring`    — OS secure storage wrapper.
+//!   • `fingerprint` — host + OS + machine-id hash.
 
 pub mod audit;
 pub mod autoupdate;
@@ -29,6 +20,7 @@ pub mod jni_android;
 pub mod keyring;
 pub mod pairing;
 pub mod shell;
+pub mod system_ops;
 pub mod task_registry;
 pub mod ws_client;
 
@@ -38,11 +30,12 @@ pub use capability::{CapabilityGate, GateDecision};
 pub use chat_store::ChatStore;
 pub use consent::{ConsentAnswer, ConsentBroker, ConsentPrompt};
 pub use fingerprint::DeviceFingerprint;
-pub use health::{WsHealth, WsHealthSnapshot};
 pub use fs_ops::FsOps;
+pub use health::{WsHealth, WsHealthSnapshot};
 pub use keyring::TokenStore;
 pub use pairing::PairingFlow;
 pub use shell::ShellRunner;
+pub use system_ops::{fetch_network, kill_process, list_processes, watch_filesystem};
 pub use ws_client::WsClient;
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +56,8 @@ pub enum DaemonError {
     Protocol(String),
     #[error("user denied consent")]
     UserDenied,
+    #[error("action cancelled")]
+    Cancelled,
     #[error("timed out after {0}ms")]
     Timeout(u64),
 }

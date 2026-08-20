@@ -27,9 +27,6 @@ macro_rules! ceprintln {
 pub fn attach() {
     use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     unsafe {
-        // Best effort: when launched from a terminal, attach to it so
-        // the console handles below resolve. When launched from an
-        // explorer/double-click, this fails and output is dropped.
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
 }
@@ -39,7 +36,6 @@ pub fn attach() {}
 
 #[cfg(windows)]
 fn console_file(name: &str) -> Option<std::fs::File> {
-    use std::io::Write;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -48,11 +44,10 @@ fn console_file(name: &str) -> Option<std::fs::File> {
     };
     const GENERIC_READ: u32 = 0x8000_0000;
     const GENERIC_WRITE: u32 = 0x4000_0000;
-    // CONOUT$/CONERR$ bypass the subsystem detachment: with
-    // windows_subsystem=windows, GetStdHandle returns NULL even after
-    // AttachConsole, but the console device names still resolve to the
-    // parent console.
-    let wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = std::ffi::OsStr::new(name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let handle = CreateFileW(
             wide.as_ptr(),
@@ -75,10 +70,6 @@ fn inherited_std_handle(which: u32) -> Option<std::fs::File> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::System::Threading::{GetStartupInfoW, STARTUPINFOW};
 
-    // The CRT nulls std handles for /SUBSYSTEM:WINDOWS binaries, but
-    // GetStartupInfoW preserves the handles the parent passed — real
-    // console handles OR pipes (the agent/CI case). This is how GUI
-    // binaries recover piped stdio.
     let mut si = std::mem::MaybeUninit::<STARTUPINFOW>::uninit();
     unsafe {
         GetStartupInfoW(si.as_mut_ptr());
@@ -101,7 +92,6 @@ pub fn out(s: &str) {
     if let Some(mut f) = inherited_std_handle(0).or_else(|| console_file("CONOUT$")) {
         let _ = f.write_all(s.as_bytes());
         let _ = f.flush();
-        return;
     }
 }
 
@@ -116,7 +106,6 @@ pub fn err(s: &str) {
     if let Some(mut f) = inherited_std_handle(1).or_else(|| console_file("CONERR$")) {
         let _ = f.write_all(s.as_bytes());
         let _ = f.flush();
-        return;
     }
 }
 

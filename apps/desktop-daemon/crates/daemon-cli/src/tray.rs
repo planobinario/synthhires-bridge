@@ -64,6 +64,14 @@ pub fn build_tray(
         .map_err(|e| daemon_core::DaemonError::Io(std::io::Error::other(format!("tray: {e}"))))?;
 
     std::thread::spawn(move || {
+        // MenuEvent runs on its own OS thread, not inside Tokio. A dedicated
+        // runtime makes the async UI command channel reliable from this
+        // thread and preserves the existing build_tray API.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tray action runtime");
+
         while let Ok(event) = MenuEvent::receiver().recv() {
             if event.id == quit_id {
                 let _ = quit_tx.send(());
@@ -71,30 +79,24 @@ pub fn build_tray(
             }
 
             if event.id == show_window_id {
-                let rt = tokio::runtime::Handle::try_current();
-                if let Ok(rt) = rt {
-                    rt.block_on(async {
-                        let ctx = ui_ctx.read().await;
-                        if let Some(ctx) = ctx.as_ref() {
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
-                            // Also ensure it's not minimized
-                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
-                                eframe::egui::vec2(700.0, 500.0),
-                            ));
-                            tracing::info!("Visible and Focus commands sent to UI");
-                        }
-                    });
-                }
+                runtime.block_on(async {
+                    let ctx = ui_ctx.read().await;
+                    if let Some(ctx) = ctx.as_ref() {
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                        // Also ensure it's not minimized
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+                            eframe::egui::vec2(700.0, 500.0),
+                        ));
+                        tracing::info!("Visible and Focus commands sent to UI");
+                    }
+                });
             }
 
             if event.id == disconnect_id {
-                let rt = tokio::runtime::Handle::try_current();
-                if let Ok(rt) = rt {
-                    rt.block_on(async {
-                        let _ = ui_cmd_tx.send(crate::UiCmd::Unpair).await;
-                    });
-                }
+                runtime.block_on(async {
+                    let _ = ui_cmd_tx.send(crate::UiCmd::Unpair).await;
+                });
             }
         }
     });

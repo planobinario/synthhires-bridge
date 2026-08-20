@@ -56,6 +56,27 @@ pub struct FsVerifyResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct FsListRequest {
+    /// Directory to list. When absent/empty, return the OS roots
+    /// (drive letters on Windows, `/` + home on Unix).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FsListResult {
+    pub parent: Option<String>,
+    pub entries: Vec<FsEntry>,
+}
+
 pub struct FsOps<'a> {
     gate: &'a CapabilityGate,
 }
@@ -146,7 +167,9 @@ impl<'a> FsOps<'a> {
                     self.probe_write(&req.path).await
                 } else {
                     let parent = req.path.parent().unwrap_or_else(|| {
-                        std::path::Path::new(&req.path).parent().unwrap_or(std::path::Path::new("."))
+                        std::path::Path::new(&req.path)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
                     });
                     self.probe_write(parent).await
                 };
@@ -185,6 +208,85 @@ impl<'a> FsOps<'a> {
         };
         let _ = fs::remove_file(&probe).await;
         read_back
+    }
+
+    /// Directory browser for the workspace picker. Read-only and gated by
+    /// the capability grant alone (like `verify`, it runs BEFORE a path is
+    /// attached, so it must not require the path to already be in
+    /// alwaysAllowPaths). `path=None` returns the OS roots.
+    pub async fn list(&self, req: FsListRequest) -> Result<FsListResult> {
+        let target = req.path.as_deref().unwrap_or("").trim();
+        if target.is_empty() {
+            return Ok(FsListResult {
+                parent: None,
+                entries: self.roots().await,
+            });
+        }
+        let dir = Path::new(target);
+        let mut entries: Vec<FsEntry> = Vec::new();
+        let mut rd = fs::read_dir(dir).await.map_err(DaemonError::Io)?;
+        while let Some(entry) = rd.next_entry().await.map_err(DaemonError::Io)? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            entries.push(FsEntry {
+                name,
+                path: path.display().to_string(),
+                is_dir,
+            });
+        }
+        // Dirs first, then files; case-insensitive name within each group.
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        let parent = dir.parent().and_then(|p| {
+            let s = p.to_string_lossy().into_owned();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+        Ok(FsListResult { parent, entries })
+    }
+
+    async fn roots(&self) -> Vec<FsEntry> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut out = Vec::new();
+            for letter in b'A'..=b'Z' {
+                let root = format!("{}:\\", letter as char);
+                if std::path::Path::new(&root).exists() {
+                    out.push(FsEntry {
+                        name: root.clone(),
+                        path: root,
+                        is_dir: true,
+                    });
+                }
+            }
+            out
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut out = vec![FsEntry {
+                name: "/".to_string(),
+                path: "/".to_string(),
+                is_dir: true,
+            }];
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = home.to_string_lossy().into_owned();
+                if !home.is_empty() {
+                    out.push(FsEntry {
+                        name: home.clone(),
+                        path: home,
+                        is_dir: true,
+                    });
+                }
+            }
+            out
+        }
     }
 
     fn gate_for_path(&self, capability: &str, path: &Path) -> Result<()> {

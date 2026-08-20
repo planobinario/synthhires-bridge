@@ -37,6 +37,11 @@ pub struct BridgeApp {
     conv_search: String,
     conv_error: Option<String>,
     consent: std::sync::Arc<ConsentBroker>,
+    // Real WS connection state (connected/RTT/reconnects/last_error).
+    // The status_rx string channel is NOT authoritative for connection
+    // state — nothing ever sent a success update, so the badge used to
+    // stay stuck on "Conectando al servidor…" forever.
+    ws_health: std::sync::Arc<daemon_core::WsHealth>,
 }
 
 impl BridgeApp {
@@ -49,6 +54,7 @@ impl BridgeApp {
         log_rx: std::sync::mpsc::Receiver<String>,
         chat_store: std::sync::Arc<ChatStore>,
         consent: std::sync::Arc<ConsentBroker>,
+        ws_health: std::sync::Arc<daemon_core::WsHealth>,
     ) -> Self {
         Self {
             status_rx,
@@ -71,6 +77,7 @@ impl BridgeApp {
             conv_search: String::new(),
             conv_error: None,
             consent,
+            ws_health,
         }
     }
 
@@ -241,22 +248,35 @@ impl BridgeApp {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| match &task.status {
                     TaskStatus::Running => {
-                        let btn_fill = if self.dark_mode {
-                            egui::Color32::from_rgb(40, 20, 20)
+                        if matches!(&task.kind, TaskKind::ShellExec) {
+                            let btn_fill = if self.dark_mode {
+                                egui::Color32::from_rgb(40, 20, 20)
+                            } else {
+                                egui::Color32::from_rgb(255, 200, 200)
+                            };
+                            let btn = egui::Button::new(
+                                egui::RichText::new("⏹ Detener")
+                                    .color(egui::Color32::from_rgb(255, 80, 80)),
+                            )
+                            .fill(btn_fill);
+                            if ui.add(btn).clicked() {
+                                let _ = self.kill_tx.try_send(task.id);
+                            }
+                            ui.label(
+                                egui::RichText::new("En proceso")
+                                    .color(egui::Color32::from_rgb(100, 150, 255)),
+                            );
                         } else {
-                            egui::Color32::from_rgb(255, 200, 200)
-                        };
-                        let btn = egui::Button::new(
-                            egui::RichText::new("⏹ Detener")
-                                .color(egui::Color32::from_rgb(255, 80, 80)),
-                        )
-                        .fill(btn_fill);
-                        if ui.add(btn).clicked() {
-                            let _ = self.kill_tx.try_send(task.id);
+                            ui.label(
+                                egui::RichText::new("En proceso · no cancelable")
+                                    .color(egui::Color32::from_rgb(100, 150, 255)),
+                            );
                         }
+                    }
+                    TaskStatus::Cancelling => {
                         ui.label(
-                            egui::RichText::new("En proceso")
-                                .color(egui::Color32::from_rgb(100, 150, 255)),
+                            egui::RichText::new("Deteniendo…")
+                                .color(egui::Color32::from_rgb(255, 190, 80)),
                         );
                     }
                     TaskStatus::Completed(code) => {
@@ -396,10 +416,7 @@ impl eframe::App for BridgeApp {
                             .color(txt_color),
                     );
                     ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(&prompt.summary)
-                            .color(txt_color),
-                    );
+                    ui.label(egui::RichText::new(&prompt.summary).color(txt_color));
                     if let Some(path) = &prompt.path {
                         ui.add_space(4.0);
                         ui.label(
@@ -413,20 +430,29 @@ impl eframe::App for BridgeApp {
                         if ui.button("Denegar").clicked() {
                             self.consent.answer(
                                 &prompt.action_id,
-                                ConsentAnswer { approved: false, remember: false },
+                                ConsentAnswer {
+                                    approved: false,
+                                    remember: false,
+                                },
                             );
                         }
                         if ui.button("Permitir").clicked() {
                             self.consent.answer(
                                 &prompt.action_id,
-                                ConsentAnswer { approved: true, remember: false },
+                                ConsentAnswer {
+                                    approved: true,
+                                    remember: false,
+                                },
                             );
                         }
                         if prompt.path.is_some() {
                             if ui.button("Permitir siempre en esta carpeta").clicked() {
                                 self.consent.answer(
                                     &prompt.action_id,
-                                    ConsentAnswer { approved: true, remember: true },
+                                    ConsentAnswer {
+                                        approved: true,
+                                        remember: true,
+                                    },
                                 );
                             }
                         }
@@ -444,13 +470,36 @@ impl eframe::App for BridgeApp {
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let status = self.status_rx.borrow().clone();
-                    let color = if status.contains("Conectado") {
-                        egui::Color32::from_rgb(50, 200, 100)
-                    } else if status.contains("Esperando") {
-                        egui::Color32::from_gray(150)
+                    // REAL connection state from WsHealth (updated on every
+                    // connect/heartbeat/error). The string channel only
+                    // carries the pairing prompt when unpaired.
+                    let h = self.ws_health.snapshot();
+                    let pairing_status = self.status_rx.borrow().clone();
+
+                    let (label, color): (String, egui::Color32) = if h.connected {
+                        let rtt = if h.last_rtt_ms > 0 {
+                            format!(" · {} ms", h.last_rtt_ms)
+                        } else {
+                            String::new()
+                        };
+                        (format!("● Conectado{rtt}"), egui::Color32::from_rgb(50, 200, 100))
+                    } else if pairing_status.contains("Esperando emparejamiento") {
+                        (
+                            "● Esperando emparejamiento…".to_string(),
+                            egui::Color32::from_gray(150),
+                        )
+                    } else if h.reconnects > 0 || !h.last_error.is_empty() {
+                        let detail = if h.reconnects > 0 {
+                            format!(" · {} reconexiones", h.reconnects)
+                        } else {
+                            String::new()
+                        };
+                        (
+                            format!("● Reconectando…{detail}"),
+                            egui::Color32::from_rgb(220, 150, 50),
+                        )
                     } else {
-                        egui::Color32::from_rgb(220, 150, 50)
+                        ("● Conectando…".to_string(), egui::Color32::from_rgb(220, 150, 50))
                     };
 
                     egui::Frame::none()
@@ -458,8 +507,30 @@ impl eframe::App for BridgeApp {
                         .rounding(15.0)
                         .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new(format!("● {}", status)).color(color).strong());
+                            ui.label(egui::RichText::new(label).color(color).strong());
                         });
+
+                    // Surface the last error while reconnecting (truncated
+                    // so the header never overflows the window).
+                    if !h.connected && !h.last_error.is_empty() {
+                        let err: String = h
+                            .last_error
+                            .chars()
+                            .take(64)
+                            .collect();
+                        ui.add_space(6.0);
+                        egui::Frame::none()
+                            .fill(if self.dark_mode { egui::Color32::from_black_alpha(40) } else { egui::Color32::from_black_alpha(10) })
+                            .rounding(10.0)
+                            .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(err)
+                                        .small()
+                                        .color(if self.dark_mode { egui::Color32::from_gray(170) } else { egui::Color32::from_gray(90) }),
+                                );
+                            });
+                    }
 
                     ui.add_space(10.0);
 

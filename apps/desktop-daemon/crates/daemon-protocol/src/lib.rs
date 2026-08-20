@@ -45,6 +45,13 @@ pub struct HelloFrame {
     pub device_kind: DeviceKind,
     pub device_name: String,
     pub client_version: String,
+    /// OS the daemon runs on (std::env::consts::OS: windows/macos/linux/android/…).
+    /// Defaulted for wire-compat with daemons that predate this field.
+    #[serde(default)]
+    pub os: String,
+    /// CPU architecture (std::env::consts::ARCH: x86_64/aarch64/…).
+    #[serde(default)]
+    pub arch: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

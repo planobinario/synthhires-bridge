@@ -10,8 +10,9 @@
 //! the user enters a single command string (e.g. "ls -la"). On Unix
 //! that goes through `Command::new("bash").arg("-lc").arg(cmd)`; on
 //! Windows there is no bash — we use `cmd.exe /C` with the command
-//! string passed as a single argv entry, so the shell still parses
-//! it as one command line.
+//! string passed verbatim via `raw_arg` (not `Command::arg`, whose
+//! C-runtime re-quoting mangles quoted paths), so the shell still
+//! parses it as one command line.
 
 use crate::{capability::CapabilityGate, DaemonError, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShellRequest {
@@ -60,6 +62,7 @@ impl<'a> ShellRunner<'a> {
     pub async fn run(
         &self,
         req: ShellRequest,
+        cancellation: CancellationToken,
     ) -> Result<(mpsc::Receiver<ShellOutputChunk>, ShellResultFuture)> {
         if !self.gate.allows("desktop.shell.execute") {
             return Err(DaemonError::CapabilityDenied(
@@ -68,11 +71,18 @@ impl<'a> ShellRunner<'a> {
         }
         let timeout = req.timeout_ms.unwrap_or(30_000);
         let mut cmd = if cfg!(windows) {
+            // /C runs the command and exits. `raw_arg` appends the command
+            // line VERBATIM, without `Command::arg`'s C-runtime re-quoting.
+            // That re-quoting is exactly what breaks quoted Windows paths
+            // (`dir "C:\Users\me\Documents"`) — cmd.exe receives
+            // backslash-escaped quotes it does not understand and errors
+            // with "El nombre de archivo ... no son correctos".
+            //
+            // No shell-injection risk beyond what the user already typed:
+            // the string is still parsed only by the user's own cmd.exe
+            // semantics, never concatenated into a privileged argv.
             let mut c = Command::new("cmd.exe");
-            // /C runs the command and exits. The command string is a
-            // single argv entry — no shell injection beyond what the
-            // user already typed into their own terminal semantics.
-            c.arg("/C").arg(&req.command);
+            c.raw_arg("/C").raw_arg(&req.command);
             c
         } else {
             let mut c = Command::new("bash");
@@ -85,8 +95,8 @@ impl<'a> ShellRunner<'a> {
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
-        // Kill the entire process group on timeout — important for
-        // shell commands that fork (e.g. `npm test && watch ...`).
+        // Kill on drop is the last-resort safety net; explicit cancellation
+        // below also terminates the process tree and waits for the child.
         cmd.kill_on_drop(true);
 
         let start = std::time::Instant::now();
@@ -152,6 +162,7 @@ impl<'a> ShellRunner<'a> {
             child,
             timeout_ms: timeout,
             started_at: start,
+            cancellation,
             tx,
             stdout_buf,
             stderr_buf,
@@ -162,13 +173,14 @@ impl<'a> ShellRunner<'a> {
     }
 }
 
-/// Awaits the child with the configured timeout. The receiver of the
-/// stream must drain it before this completes; otherwise the
-/// pumps deadlock on full channel.
+/// Awaits the child with the configured timeout or an explicit cancellation.
+/// The receiver of the stream must drain it before this completes; otherwise
+/// the pumps deadlock on a full channel.
 pub struct ShellResultFuture {
     child: tokio::process::Child,
     timeout_ms: u64,
     started_at: std::time::Instant,
+    cancellation: CancellationToken,
     tx: mpsc::Sender<ShellOutputChunk>,
     stdout_buf: Arc<Mutex<String>>,
     stderr_buf: Arc<Mutex<String>>,
@@ -178,20 +190,28 @@ pub struct ShellResultFuture {
 
 impl ShellResultFuture {
     pub async fn await_result(mut self) -> Result<ShellResult> {
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(self.timeout_ms),
-            self.child.wait(),
-        )
-        .await;
-        // Drain tx so the pumps don't deadlock.
+        // Cancellation is real only after the child has been terminated and
+        // reaped. The UI therefore cannot display a terminal state early.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(self.timeout_ms), async {
+                tokio::select! {
+                    result = self.child.wait() => result.map(Some),
+                    _ = self.cancellation.cancelled() => {
+                        terminate_child(&mut self.child).await;
+                        Ok(None)
+                    }
+                }
+            })
+            .await;
+
+        // Drain tx so the pumps don't deadlock, then wait for both output
+        // readers before returning the terminal state.
         drop(self.tx);
-        // The pumps reach EOF only after the child exits AND the pipe
-        // is fully drained — join them so the accumulated buffers are
-        // complete before we read them.
         let _ = self.stdout_task.await;
         let _ = self.stderr_task.await;
+
         match result {
-            Ok(Ok(status)) => {
+            Ok(Ok(Some(status))) => {
                 let stdout_buf = self.stdout_buf.lock().await.clone();
                 let stderr_buf = self.stderr_buf.lock().await.clone();
                 Ok(ShellResult {
@@ -201,13 +221,72 @@ impl ShellResultFuture {
                     duration_ms: self.started_at.elapsed().as_millis() as u64,
                 })
             }
+            Ok(Ok(None)) => Err(DaemonError::Cancelled),
             Ok(Err(e)) => Err(DaemonError::Io(e)),
             Err(_) => {
-                // Hard kill on timeout. start_kill sends SIGKILL.
-                let _ = self.child.start_kill();
-                let _ = self.child.wait().await;
+                terminate_child(&mut self.child).await;
                 Err(DaemonError::Timeout(self.timeout_ms))
             }
         }
+    }
+}
+
+async fn terminate_child(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status()
+                .await;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status()
+                .await;
+        }
+    }
+    // Fallback if the tree command is unavailable or the child exited after
+    // the PID lookup and before the platform signal was delivered.
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::ScopeSnapshot;
+
+    #[tokio::test]
+    async fn cancellation_terminates_child_and_returns_cancelled() {
+        let gate = CapabilityGate::new(ScopeSnapshot {
+            capabilities: vec!["desktop.shell.execute".into()],
+            always_allow_paths: Vec::new(),
+        });
+        let cancellation = CancellationToken::new();
+        let command = if cfg!(target_os = "windows") {
+            "ping -n 30 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let (mut output, future) = ShellRunner::new(&gate)
+            .run(
+                ShellRequest {
+                    command: command.into(),
+                    cwd: None,
+                    timeout_ms: Some(10_000),
+                },
+                cancellation.clone(),
+            )
+            .await
+            .expect("shell child should spawn");
+        let drain = tokio::spawn(async move { while output.recv().await.is_some() {} });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancellation.cancel();
+        let result = future.await_result().await;
+        assert!(matches!(result, Err(DaemonError::Cancelled)));
+        drain.await.expect("output drain should finish");
     }
 }

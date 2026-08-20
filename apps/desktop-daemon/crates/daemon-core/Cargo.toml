@@ -12,6 +12,7 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tungstenite = { workspace = true }
 futures-util = { workspace = true }
+notify = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -23,17 +24,12 @@ thiserror = "1"
 uuid = { workspace = true }
 tokio-util = "0.7"
 directories = { workspace = true }
-# Pairing flow's HTTP POST to /api/devices/pair/complete.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# Encrypted local audit log (apps/desktop-daemon/crates/daemon-core/src/audit.rs).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 aes-gcm = "0.10"
 rand_core = { version = "0.6", features = ["std"] }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 http = "1"
-# Local chat archive (chat_store.rs). `bundled` compiles SQLite from
-# source so cross-compilation (cross / cargo-ndk) never needs a
-# system libsqlite3.
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 [lib]

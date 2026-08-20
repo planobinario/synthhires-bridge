@@ -48,14 +48,12 @@ impl WsHealth {
 
     pub fn mark_connected(&self) {
         self.connected.store(true, Ordering::Relaxed);
-        self.last_connected_at
-            .store(now_ms(), Ordering::Relaxed);
+        self.last_connected_at.store(now_ms(), Ordering::Relaxed);
     }
 
     pub fn mark_disconnected(&self) {
         if self.connected.swap(false, Ordering::Relaxed) {
-            self.last_disconnected_at
-                .store(now_ms(), Ordering::Relaxed);
+            self.last_disconnected_at.store(now_ms(), Ordering::Relaxed);
             self.reconnects.fetch_add(1, Ordering::Relaxed);
         }
     }

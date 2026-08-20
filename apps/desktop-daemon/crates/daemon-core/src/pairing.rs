@@ -1,11 +1,4 @@
-//! Pairing flow glue.
-//!
-//! Walks the user through:
-//!   1. Show a pairing code entry dialog (the 6-char code the user
-//!      reads off the web UI).
-//!   2. POST /api/devices/pair/complete with fingerprint + name + scope.
-//!   3. Receive deviceId + raw token.
-//!   4. Persist both to the keyring + state.json.
+//! Pairing flow glue: exchange a short-lived code for a device token.
 
 use crate::{keyring::TokenStore, Result};
 use daemon_protocol::Scopes;
@@ -46,32 +39,55 @@ impl<'a> PairingFlow<'a> {
         }
     }
 
-    /// POST to /api/devices/pair/complete. Returns the response or an
-    /// error that the daemon CLI surfaces to the user.
-    pub async fn complete(&self, req: PairCompleteRequest) -> Result<PairCompleteResponse> {
-        let url = format!("{}/api/devices/pair/complete", self.backend_url);
-        let resp = self
+    pub async fn complete(&self, mut req: PairCompleteRequest) -> Result<PairCompleteResponse> {
+        // Keep CLI/deep-link pairing aligned with the web's default scope.
+        // Existing callers can request a subset, but a Desktop client must
+        // never silently omit a capability that this binary implements.
+        if req.device_kind == "desktop" {
+            for capability in [
+                "desktop.shell.execute",
+                "desktop.fs.read",
+                "desktop.fs.write",
+                "desktop.fs.delete",
+                "desktop.fs.verify",
+                "desktop.fs.list",
+                "desktop.fs.watch",
+                "desktop.process.list",
+                "desktop.process.kill",
+                "desktop.network.fetch",
+                "sync.chat.push",
+            ] {
+                if !req.desired_scopes.iter().any(|value| value == capability) {
+                    req.desired_scopes.push(capability.to_string());
+                }
+            }
+        }
+
+        let url = format!(
+            "{}/api/devices/pair/complete",
+            self.backend_url.trim_end_matches('/')
+        );
+        let response = self
             .client
             .post(&url)
             .json(&req)
             .send()
             .await
             .map_err(|e| crate::DaemonError::Protocol(format!("pair/complete http: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
             return Err(crate::DaemonError::Protocol(format!(
                 "pair/complete {status}: {body}"
             )));
         }
-        let body: PairCompleteResponse = resp
+
+        let body: PairCompleteResponse = response
             .json()
             .await
             .map_err(|e| crate::DaemonError::Protocol(format!("pair/complete decode: {e}")))?;
-        // The web API returns a relative wsUrl ('/api/devices/ws'). Resolve
-        // it against the backend origin so the WS client dials a real URL.
         let ws_url = if body.ws_url.starts_with("ws://") || body.ws_url.starts_with("wss://") {
-            body.ws_url
+            body.ws_url.clone()
         } else {
             let origin = self
                 .backend_url
@@ -80,20 +96,17 @@ impl<'a> PairingFlow<'a> {
                 .replace("http://", "ws://");
             format!("{}{}", origin, body.ws_url)
         };
-        // Persist the token to the OS keyring; the state.json holds
-        // the deviceId + scopes. The raw token never touches disk in
-        // plaintext.
         TokenStore::save(&body.device_id, &body.token)?;
         Ok(PairCompleteResponse { ws_url, ..body })
     }
 }
 
 pub fn fingerprint_hash(hostname: &str, os: &str, machine_id: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(hostname.as_bytes());
-    h.update(b"|");
-    h.update(os.as_bytes());
-    h.update(b"|");
-    h.update(machine_id.as_bytes());
-    hex::encode(h.finalize())
+    let mut hash = Sha256::new();
+    hash.update(hostname.as_bytes());
+    hash.update(b"|");
+    hash.update(os.as_bytes());
+    hash.update(b"|");
+    hash.update(machine_id.as_bytes());
+    hex::encode(hash.finalize())
 }
