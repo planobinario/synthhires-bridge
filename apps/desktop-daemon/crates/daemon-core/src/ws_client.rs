@@ -1,7 +1,7 @@
 use crate::{
-    capability::{CapabilityGate, GateDecision, ScopeSnapshot},
+    capability::{CapabilityGate, ScopeSnapshot},
     chat_store::ChatStore,
-    consent::{ConsentAnswer, ConsentBroker, ConsentPrompt},
+    consent::ConsentBroker,
     health::WsHealth,
     system_ops::{
         fetch_network, kill_process, list_processes, watch_filesystem, FsWatchRequest,
@@ -237,24 +237,13 @@ impl WsClient {
                     )
                     .await;
             }
-            if !request.skip_consent_prompt
-                && !self
-                    .await_consent(&request, command.to_string(), None)
-                    .await
-            {
+        }
+        if request.capability == "desktop.process.kill" {
+            if !self.gate.lock().await.allows("desktop.process.kill") {
                 return self
-                    .send_error(ws, request.id, "consent_denied".into())
+                    .send_error(ws, request.id, "capability_denied: desktop.process.kill".into())
                     .await;
             }
-        }
-        if request.capability == "desktop.process.kill"
-            && !self
-                .await_consent(&request, "Terminar un proceso del sistema".into(), None)
-                .await
-        {
-            return self
-                .send_error(ws, request.id, "consent_denied".into())
-                .await;
         }
 
         let started = std::time::Instant::now();
@@ -564,74 +553,18 @@ impl WsClient {
 
     async fn path_gate(
         &self,
-        request: &daemon_protocol::ActionRequestFrame,
+        _request: &daemon_protocol::ActionRequestFrame,
         capability: &str,
         path: &std::path::Path,
     ) -> Result<CapabilityGate> {
         if !self.gate.lock().await.allows(capability) {
             return Err(DaemonError::CapabilityDenied(capability.into()));
         }
-        if request.skip_consent_prompt {
-            return Ok(self
-                .gate
-                .lock()
-                .await
-                .with_additional_path(path.to_path_buf()));
-        }
-        match self.gate.lock().await.check_path(capability, path) {
-            GateDecision::Allow => Ok(self.gate.lock().await.clone()),
-            GateDecision::Deny => Err(DaemonError::CapabilityDenied(capability.into())),
-            GateDecision::RequireConsent => {
-                if !self.await_path_consent(request, path).await {
-                    return Err(DaemonError::UserDenied);
-                }
-                Ok(self
-                    .gate
-                    .lock()
-                    .await
-                    .with_additional_path(path.to_path_buf()))
-            }
-        }
-    }
-
-    async fn await_path_consent(
-        &self,
-        request: &daemon_protocol::ActionRequestFrame,
-        path: &std::path::Path,
-    ) -> bool {
-        self.await_consent(
-            request,
-            format!("{} en {}", request.capability, path.display()),
-            Some(path.display().to_string()),
-        )
-        .await
-    }
-
-    async fn await_consent(
-        &self,
-        request: &daemon_protocol::ActionRequestFrame,
-        summary: String,
-        path: Option<String>,
-    ) -> bool {
-        let prompt = ConsentPrompt {
-            action_id: request.id.clone(),
-            capability: request.capability.clone(),
-            summary,
-            path: path.clone(),
-        };
-        let mut receiver = self.consent.ask(prompt);
-        let answer = tokio::time::timeout(Duration::from_secs(120), &mut receiver).await;
-        let answer = match answer {
-            Ok(Ok(value)) => value,
-            Ok(Err(_)) | Err(_) => ConsentAnswer::default(),
-        };
-        if answer.approved && answer.remember {
-            if let Some(path) = path {
-                let mut gate = self.gate.lock().await;
-                *gate = gate.with_additional_path(path.into());
-            }
-        }
-        answer.approved
+        Ok(self
+            .gate
+            .lock()
+            .await
+            .with_additional_path(path.to_path_buf()))
     }
 
     async fn send_error(&self, ws: &mut WsStream, action_id: String, error: String) -> Result<()> {
