@@ -713,7 +713,7 @@ async fn background_daemon_task(
                                         Ok(res) => {
                                             {
                                                 let mut s = state_clone.write().await;
-                                                s.device_id = Some(res.device_id.clone());
+                                                s.device_id = Some(res.data.device_id.clone());
                                                 s.backend_url = Some(backend.clone());
                                                 let _ = s.save(&config_dir_clone).await;
                                             }
@@ -721,7 +721,7 @@ async fn background_daemon_task(
                                             // Start WS client with the REAL
                                             // backend + deviceId.
                                             let ws_state = state_clone.clone();
-                                            let ws_backend = res.ws_url.clone();
+                                            let ws_backend = res.data.ws_url.clone();
                                             let ws_store = chat_store_clone.clone();
                                             let ws_consent = consent_clone.clone();
                                             let ws_health_clone = health_clone.clone();
@@ -745,7 +745,7 @@ async fn background_daemon_task(
 
                                             tracing::info!(
                                                 "Paired device {}; WS client started. ACK.",
-                                                res.device_id
+                                                res.data.device_id
                                             );
                                             let _ = stream.write_all(b"ACK").await;
                                         }
@@ -1200,13 +1200,13 @@ fn cmd_pair(
             })
             .await?;
         let state = DaemonState {
-            device_id: Some(res.device_id.clone()),
-            scopes: res.scopes.clone(),
-            backend_url: Some(res.ws_url.clone()),
+            device_id: Some(res.data.device_id.clone()),
+            scopes: res.data.scopes.clone(),
+            backend_url: Some(res.data.ws_url.clone()),
         };
         write_state(config_dir, &state)?;
-        cprintln!("paired device: {}", res.device_id);
-        cprintln!("ws url       : {}", res.ws_url);
+        cprintln!("paired device: {}", res.data.device_id);
+        cprintln!("ws url       : {}", res.data.ws_url);
         cprintln!("note         : restart the daemon to connect (or use `run`).");
         Ok(())
     })

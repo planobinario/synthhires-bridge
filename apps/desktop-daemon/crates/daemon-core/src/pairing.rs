@@ -18,12 +18,19 @@ pub struct PairCompleteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PairCompleteResponse {
+pub struct PairCompleteData {
     pub device_id: String,
     pub token: String,
     pub token_expires_at: String,
     pub ws_url: String,
     pub scopes: Scopes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairCompleteResponse {
+    pub success: bool,
+    pub data: PairCompleteData,
 }
 
 pub struct PairingFlow<'a> {
@@ -86,18 +93,21 @@ impl<'a> PairingFlow<'a> {
             .json()
             .await
             .map_err(|e| crate::DaemonError::Protocol(format!("pair/complete decode: {e}")))?;
-        let ws_url = if body.ws_url.starts_with("ws://") || body.ws_url.starts_with("wss://") {
-            body.ws_url.clone()
+        let ws_url = if body.data.ws_url.starts_with("ws://") || body.data.ws_url.starts_with("wss://") {
+            body.data.ws_url.clone()
         } else {
             let origin = self
                 .backend_url
                 .trim_end_matches('/')
                 .replace("https://", "wss://")
                 .replace("http://", "ws://");
-            format!("{}{}", origin, body.ws_url)
+            format!("{}{}", origin, body.data.ws_url)
         };
-        TokenStore::save(&body.device_id, &body.token)?;
-        Ok(PairCompleteResponse { ws_url, ..body })
+        TokenStore::save(&body.data.device_id, &body.data.token)?;
+        Ok(PairCompleteResponse {
+            data: PairCompleteData { ws_url, ..body.data },
+            success: body.success,
+        })
     }
 }
 
