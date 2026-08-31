@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key><string>SynthHires Bridge</string>
+    <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleName</key><string>SynthHiresBridge</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>UILaunchScreen</key><dict/>
+    <key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLSchemes</key><array><string>synthhires</string></array></dict></array>
+    <key>NSLocationWhenInUseUsageDescription</key><string>SynthHires usa tu ubicación solo cuando autorizas una acción explícita.</string>
+    <key>NSContactsUsageDescription</key><string>SynthHires usa tus contactos solo para una acción explícita del agente.</string>
+    <key>NSCameraUsageDescription</key><string>SynthHires puede usar la cámara para escanear un código de emparejamiento.</string>
+    <key>NSUserNotificationUsageDescription</key><string>SynthHires muestra el estado de conexión del Bridge.</string>
+</dict>
+</plist>

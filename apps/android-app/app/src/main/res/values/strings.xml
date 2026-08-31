@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">SynthHires Bridge</string>
+    <string name="bridge_channel_name">SynthHires Bridge activo</string>
+    <string name="bridge_channel_desc">Mantiene la conexión segura con SynthHires.</string>
+    <string name="bridge_notification_title">SynthHires Bridge activo</string>
+    <string name="bridge_notification_text">Conexión segura lista para acciones del agente.</string>
+    <string name="bridge_action_pause">Pausar</string>
+    <string name="notification_listener_label">Leer notificaciones para SynthHires</string>
+    <string name="automation_service_label">Automatización controlada de SynthHires</string>
+</resources>

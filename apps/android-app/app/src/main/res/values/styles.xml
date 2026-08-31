@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.SynthHires.Bridge" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#4f46e5</item>
+        <item name="android:navigationBarColor">#ffffff</item>
+        <item name="android:statusBarColor">#ffffff</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

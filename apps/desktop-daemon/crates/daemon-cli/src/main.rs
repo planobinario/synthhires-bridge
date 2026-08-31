@@ -90,7 +90,7 @@ enum Cmd {
     },
     /// Pair the daemon with a backend using a pairing code.
     Pair {
-        /// Backend origin (e.g. https://app.synthhires.com).
+        /// Backend origin (e.g. https://synthhires.com).
         backend: String,
         /// Pairing code shown by the web UI.
         code: String,
@@ -468,7 +468,7 @@ async fn background_daemon_task(
 
     let backend_url = cli
         .backend_url
-        .unwrap_or_else(|| "wss://app.synthhires.com/api/devices/ws".to_string());
+        .unwrap_or_else(|| "wss://synthhires.com/api/devices/ws".to_string());
 
     // Determine pairing status
     let is_paired = {

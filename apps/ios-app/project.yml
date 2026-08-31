@@ -1,0 +1,23 @@
+name: SynthHiresBridge
+options:
+  bundleIdPrefix: com.synthhires
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.9
+    DEVELOPMENT_TEAM: ""
+targets:
+  SynthHiresBridge:
+    type: application
+    platform: iOS
+    sources:
+      - path: SynthHiresBridge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.synthhires.bridge
+        INFOPLIST_FILE: SynthHiresBridge/Info.plist
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+    scheme:
+      testTargets: []

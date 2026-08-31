@@ -1,0 +1,5 @@
+[2m2026-08-26T19:42:50.842897Z[0m [32m INFO[0m [2msynthhires_bridge[0m[2m:[0m Daemon starting, logs under C:/Users/emili/.config/synthhires-bridge-edge
+[2m2026-08-26T19:42:50.864460Z[0m [32m INFO[0m [2msynthhires_bridge[0m[2m:[0m IPC Listener bound successfully
+[2m2026-08-26T19:42:50.887365Z[0m [32m INFO[0m [2msynthhires_bridge[0m[2m:[0m Daemon background tasks running.
+[2m2026-08-26T19:42:50.887755Z[0m [32m INFO[0m [2msynthhires_bridge::server[0m[2m:[0m Starting secure local HTTP server on 127.0.0.1:7333
+[2m2026-08-26T19:57:09.865179Z[0m [32m INFO[0m [2msynthhires_bridge[0m[2m:[0m IPC Received data length: 20

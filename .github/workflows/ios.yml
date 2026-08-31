@@ -1,0 +1,33 @@
+name: Build iOS Bridge
+
+on:
+  push:
+    paths:
+      - 'apps/ios-app/**'
+      - '.github/workflows/ios.yml'
+  pull_request:
+    paths:
+      - 'apps/ios-app/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: apps/ios-app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build unsigned simulator app
+        run: xcodebuild -project SynthHiresBridge.xcodeproj -scheme SynthHiresBridge -sdk iphonesimulator -configuration Debug -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Package simulator artifact
+        run: ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Debug-iphonesimulator/SynthHiresBridge.app synthhires-bridge-ios-simulator.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthhires-bridge-ios-simulator
+          path: apps/ios-app/synthhires-bridge-ios-simulator.zip
