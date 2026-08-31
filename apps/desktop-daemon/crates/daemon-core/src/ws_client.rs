@@ -38,7 +38,7 @@ pub struct WsClient {
     device_name: String,
     gate: Arc<Mutex<CapabilityGate>>,
     chat_store: Arc<ChatStore>,
-    consent: Arc<ConsentBroker>,
+    _consent: Arc<ConsentBroker>,
     health: Arc<WsHealth>,
 }
 
@@ -65,7 +65,7 @@ impl WsClient {
             device_name: device_name.into(),
             gate: Arc::new(Mutex::new(gate)),
             chat_store,
-            consent,
+            _consent: consent,
             health,
         }
     }

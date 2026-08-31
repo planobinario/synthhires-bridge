@@ -48,6 +48,10 @@ struct Cli {
     #[arg(long)]
     config_dir: Option<PathBuf>,
 
+    /// Run in headless mode without egui window.
+    #[arg(long)]
+    headless: bool,
+
     /// Agent-facing control subcommands. The daemon itself runs when NO
     /// subcommand is given (or via `run`).
     #[command(subcommand)]
@@ -273,6 +277,33 @@ fn main() -> Result<()> {
     let ws_health = std::sync::Arc::new(daemon_core::WsHealth::new());
     let ws_health_bg = ws_health.clone();
 
+    if cli.headless {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build tokio runtime");
+
+        if let Err(e) = rt.block_on(async move {
+            background_daemon_task(
+                status_tx,
+                tasks_tx,
+                kill_rx,
+                ui_cmd_rx,
+                ui_cmd_tx_bg,
+                ui_ctx_clone,
+                chat_store_bg,
+                consent_broker_bg,
+                ws_health_bg,
+            )
+            .await
+        }) {
+            tracing::error!("Headless daemon exited with error: {e}");
+            return Err(e);
+        }
+        tracing::info!("Headless daemon exited cleanly");
+        return Ok(());
+    }
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -375,61 +406,63 @@ async fn background_daemon_task(
 
     let last_poll = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    let lock = single_instance::SingleInstance::new("synthhires-bridge");
-    let deep_link = std::env::args().find(|a| a.starts_with("synthhires://"));
+    let _lock = if !cli.headless {
+        let l = single_instance::SingleInstance::new("synthhires-bridge");
+        let deep_link = std::env::args().find(|a| a.starts_with("synthhires://"));
 
-    if let Ok(ref instance) = lock {
-        if !instance.is_single() {
-            tracing::info!("Bridge is already running.");
-            // Send deep link via IPC to the running instance
-            if let Some(link) = deep_link {
-                use interprocess::local_socket::prelude::*;
-                use std::io::Write;
+        if let Ok(ref instance) = l {
+            if !instance.is_single() {
+                tracing::info!("Bridge is already running.");
+                // Send deep link via IPC to the running instance
+                if let Some(link) = deep_link {
+                    use interprocess::local_socket::prelude::*;
+                    use std::io::Write;
 
-                let name = if cfg!(windows) {
-                    "synthhires-bridge-ipc"
-                        .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
-                        .unwrap()
+                    let name = if cfg!(windows) {
+                        "synthhires-bridge-ipc"
+                            .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+                            .unwrap()
+                    } else {
+                        "/tmp/synthhires-bridge-ipc.sock"
+                            .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                            .unwrap()
+                    };
+
+                    if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
+                        let _ = conn.write_all(link.as_bytes());
+                        // Wait for ACK
+                        let mut buf = [0u8; 3];
+                        use std::io::Read;
+                        let _ = conn.read_exact(&mut buf);
+                    }
                 } else {
-                    "/tmp/synthhires-bridge-ipc.sock"
-                        .to_fs_name::<interprocess::local_socket::GenericFilePath>()
-                        .unwrap()
-                };
-
-                if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
-                    let _ = conn.write_all(link.as_bytes());
-                    // Wait for ACK
-                    let mut buf = [0u8; 3];
-                    use std::io::Read;
-                    let _ = conn.read_exact(&mut buf);
+                    use interprocess::local_socket::prelude::*;
+                    use std::io::Write;
+                    let name = if cfg!(windows) {
+                        "synthhires-bridge-ipc"
+                            .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
+                            .unwrap()
+                    } else {
+                        "/tmp/synthhires-bridge-ipc.sock"
+                            .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                            .unwrap()
+                    };
+                    if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
+                        let _ = conn.write_all(b"synthhires://ping-ui");
+                        let mut buf = [0u8; 3];
+                        use std::io::Read;
+                        let _ = conn.read_exact(&mut buf);
+                    } else {
+                        tracing::warn!("IPC connection to running instance failed");
+                    }
                 }
-            } else {
-                use interprocess::local_socket::prelude::*;
-                use std::io::Write;
-                let name = if cfg!(windows) {
-                    "synthhires-bridge-ipc"
-                        .to_ns_name::<interprocess::local_socket::GenericNamespaced>()
-                        .unwrap()
-                } else {
-                    "/tmp/synthhires-bridge-ipc.sock"
-                        .to_fs_name::<interprocess::local_socket::GenericFilePath>()
-                        .unwrap()
-                };
-                if let Ok(mut conn) = interprocess::local_socket::Stream::connect(name) {
-                    let _ = conn.write_all(b"synthhires://ping-ui");
-                    let mut buf = [0u8; 3];
-                    use std::io::Read;
-                    let _ = conn.read_exact(&mut buf);
-                } else {
-                    tracing::warn!("IPC connection to running instance failed");
-                }
+                return Ok(());
             }
-            return Ok(());
         }
+        Some(l)
     } else {
-        tracing::error!("Failed to acquire single-instance lock");
-        return Ok(());
-    }
+        None
+    };
 
     let state = Arc::new(RwLock::new(DaemonState::load(&config_dir).await?));
 
@@ -793,13 +826,24 @@ async fn background_daemon_task(
         let _ = status_tx.send("Esperando emparejamiento...".to_string());
     }
 
-    let (_tray_handle, quit_rx) = tray::build_tray(
-        state.clone(),
-        config_dir.clone(),
-        local_port,
-        ui_ctx.clone(),
-        ui_cmd_tx.clone(),
-    )?;
+    let quit_rx = if !cli.headless {
+        let tray_res = tray::build_tray(
+            state.clone(),
+            config_dir.clone(),
+            local_port,
+            ui_ctx.clone(),
+            ui_cmd_tx.clone(),
+        );
+        match tray_res {
+            Ok((_handle, rx)) => Some(rx),
+            Err(err) => {
+                tracing::warn!("System tray not available ({err}); continuing in headless mode");
+                None
+            }
+        }
+    } else {
+        None
+    };
     tracing::info!("Daemon background tasks running.");
 
     // Spawn local HTTP server for zero-click pairing
@@ -825,8 +869,21 @@ async fn background_daemon_task(
 
     // El estado de UI ya fue actualizado arriba (Conectando o Esperando emparejamiento)
 
-    // Block the tokio thread until quit signal
-    _ = quit_rx.await;
+    // Block the tokio thread until quit signal or Ctrl+C
+    if let Some(rx) = quit_rx {
+        match rx.await {
+            Ok(()) => {
+                tracing::info!("Received quit signal from tray menu");
+            }
+            Err(_) => {
+                tracing::info!("Running daemon main loop (waiting for shutdown or process termination)...");
+                std::future::pending::<()>().await;
+            }
+        }
+    } else {
+        tracing::info!("Running daemon main loop (headless/no tray)...");
+        std::future::pending::<()>().await;
+    }
     tracing::info!("tokio background daemon exiting");
     Ok(())
 }
@@ -1202,7 +1259,7 @@ fn cmd_pair(
         let state = DaemonState {
             device_id: Some(res.data.device_id.clone()),
             scopes: res.data.scopes.clone(),
-            backend_url: Some(res.data.ws_url.clone()),
+            backend_url: Some(backend.clone()),
         };
         write_state(config_dir, &state)?;
         cprintln!("paired device: {}", res.data.device_id);

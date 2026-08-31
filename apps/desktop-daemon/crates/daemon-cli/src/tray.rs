@@ -10,7 +10,7 @@ use tray_icon::{
 use super::DaemonState;
 
 pub struct TrayHandle {
-    _tray: tray_icon::TrayIcon,
+    _tray: Option<tray_icon::TrayIcon>,
 }
 
 pub fn build_tray(
@@ -56,50 +56,58 @@ pub fn build_tray(
     let quit_id = quit_item.id();
     menu.append(quit_item).ok();
 
-    let tray = TrayIconBuilder::new()
+    let tray_res = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .with_tooltip("SynthHires Bridge — 🟢 Activo (127.0.0.1)")
-        .build()
-        .map_err(|e| daemon_core::DaemonError::Io(std::io::Error::other(format!("tray: {e}"))))?;
+        .build();
 
-    std::thread::spawn(move || {
-        // MenuEvent runs on its own OS thread, not inside Tokio. A dedicated
-        // runtime makes the async UI command channel reliable from this
-        // thread and preserves the existing build_tray API.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create tray action runtime");
+    let tray = match tray_res {
+        Ok(t) => {
+            std::thread::spawn(move || {
+                // MenuEvent runs on its own OS thread, not inside Tokio. A dedicated
+                // runtime makes the async UI command channel reliable from this
+                // thread and preserves the existing build_tray API.
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create tray action runtime");
 
-        while let Ok(event) = MenuEvent::receiver().recv() {
-            if event.id == quit_id {
-                let _ = quit_tx.send(());
-                std::process::exit(0);
-            }
-
-            if event.id == show_window_id {
-                runtime.block_on(async {
-                    let ctx = ui_ctx.read().await;
-                    if let Some(ctx) = ctx.as_ref() {
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
-                        // Also ensure it's not minimized
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
-                            eframe::egui::vec2(700.0, 500.0),
-                        ));
-                        tracing::info!("Visible and Focus commands sent to UI");
+                while let Ok(event) = MenuEvent::receiver().recv() {
+                    if event.id == quit_id {
+                        let _ = quit_tx.send(());
+                        std::process::exit(0);
                     }
-                });
-            }
 
-            if event.id == disconnect_id {
-                runtime.block_on(async {
-                    let _ = ui_cmd_tx.send(crate::UiCmd::Unpair).await;
-                });
-            }
+                    if event.id == show_window_id {
+                        runtime.block_on(async {
+                            let ctx = ui_ctx.read().await;
+                            if let Some(ctx) = ctx.as_ref() {
+                                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
+                                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                                // Also ensure it's not minimized
+                                ctx.send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+                                    eframe::egui::vec2(700.0, 500.0),
+                                ));
+                                tracing::info!("Visible and Focus commands sent to UI");
+                            }
+                        });
+                    }
+
+                    if event.id == disconnect_id {
+                        runtime.block_on(async {
+                            let _ = ui_cmd_tx.send(crate::UiCmd::Unpair).await;
+                        });
+                    }
+                }
+            });
+            Some(t)
         }
-    });
+        Err(e) => {
+            tracing::warn!("Failed to initialize tray icon ({e}), continuing in headless mode");
+            None
+        }
+    };
 
     let handle = TrayHandle { _tray: tray };
     Ok((handle, quit_rx))

@@ -61,7 +61,8 @@ pub async fn start_http_server(
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _parts| {
             let o = origin.as_bytes();
-            o == b"https://app.synthhires.com"
+            o == b"https://synthhires.com"
+                || o == b"https://app.synthhires.com"
                 || o == b"http://localhost:4321"
                 || o == b"http://127.0.0.1:4321"
                 || o == b"http://localhost:8787"
@@ -94,7 +95,8 @@ fn check_origin(headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, &'st
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if origin != "https://app.synthhires.com"
+    if origin != "https://synthhires.com"
+        && origin != "https://app.synthhires.com"
         && origin != "http://localhost:4321"
         && origin != "http://127.0.0.1:4321"
         && origin != "http://localhost:8787"
