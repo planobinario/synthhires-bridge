@@ -19,7 +19,7 @@ overflow — es un problema del toolchain local; el CI compila bien.
 
 ## Publicación de un binario nuevo
 
-1. Trabaja en este repo (`synthhires-bridge`), nunca en `synth-hires`.
+1. Trabaja en este repo (`synth-hires-bridge`), nunca en `synth-hires`.
 2. Bump de versión en `apps/desktop-daemon/Cargo.toml` (y deja que Cargo
    actualice `Cargo.lock`).
 3. Commit + push a `main`:

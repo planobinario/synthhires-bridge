@@ -14,4 +14,4 @@ Todo el flujo de trabajo está en `apps/desktop-daemon/AGENTS.md`:
 - Autenticación de GitHub CLI (`gh auth login --with-token`).
 - Contrato de protocolo web↔daemon.
 
-Espejo en GitHub: `planobinario/synthhires-bridge`.
+Espejo en GitHub: `planobinario/synth-hires-bridge`.
